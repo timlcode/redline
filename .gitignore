@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+
+# runtime data & secrets (never version)
+data/
+*.log
+server.log
+
+# build output
+dist/
+release/
+build/
+out/
+*.AppImage
+*.dmg
+*.exe
+*.deb
+*.rpm
+
+# electron + packaging cruft
+.electron-builder/
+.cache/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# local scratch
+.scratch/

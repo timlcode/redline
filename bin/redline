@@ -1,0 +1,84 @@
+#!/bin/bash
+# Redline launcher: starts the local server if it is not running, then opens the
+# app window through Omarchy's web-app launcher. Optional argument: a PDF to open.
+
+set -u
+
+APP_DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+PORT=4521
+URL="http://127.0.0.1:$PORT"
+DATA_DIR="$HOME/.local/share/redline"
+LOG="$DATA_DIR/server.log"
+mkdir -p "$DATA_DIR"
+
+export PATH="$HOME/.local/share/mise/shims:$HOME/.local/bin:/usr/local/bin:/usr/bin:$PATH"
+
+find_node() {
+  if command -v node >/dev/null 2>&1; then
+    command -v node
+    return
+  fi
+  ls -d "$HOME"/.local/share/mise/installs/node/*/bin/node 2>/dev/null | sort -V | tail -1
+}
+
+healthy() {
+  curl -sf -m 1 "$URL/api/health" >/dev/null 2>&1
+}
+
+running_version() {
+  curl -sf -m 1 "$URL/api/health" 2>/dev/null | sed -n 's/.*"version":"\([^"]*\)".*/\1/p'
+}
+
+built_version() {
+  sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$APP_DIR/package.json" | head -1
+}
+
+start_server() {
+  local node
+  node="$(find_node)"
+  if [[ -z "$node" ]]; then
+    notify-send "Redline" "Node.js was not found. Install it with mise or pacman." 2>/dev/null
+    exit 1
+  fi
+  (cd "$APP_DIR" && setsid nohup "$node" server.mjs >>"$LOG" 2>&1 &)
+  for _ in $(seq 1 80); do
+    healthy && return 0
+    sleep 0.1
+  done
+  notify-send "Redline" "The Redline server did not start. See $LOG" 2>/dev/null
+  exit 1
+}
+
+# Stops only the Redline server started from this project directory.
+stop_server() {
+  local pid cwd
+  for pid in $(pgrep -f "server\.mjs" 2>/dev/null); do
+    cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null)"
+    [[ "$cwd" == "$APP_DIR" ]] && kill "$pid" 2>/dev/null
+  done
+  for _ in $(seq 1 30); do
+    healthy || return 0
+    sleep 0.1
+  done
+}
+
+if healthy; then
+  # Restart a stale server after an update.
+  if [[ "$(running_version)" != "$(built_version)" ]]; then
+    stop_server
+    start_server
+  fi
+else
+  start_server
+fi
+
+if [[ $# -ge 1 && -f "$1" ]]; then
+  file="$(readlink -f "$1")"
+  enc="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$file")"
+  URL="$URL/?open=$enc"
+fi
+
+if command -v omarchy-launch-webapp >/dev/null 2>&1; then
+  exec omarchy-launch-webapp "$URL"
+fi
+exec chromium --app="$URL"
