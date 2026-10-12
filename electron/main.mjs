@@ -1,5 +1,8 @@
 import { app, BrowserWindow, dialog } from "electron";
+import updaterPkg from "electron-updater";
 import { createServer } from "../server.mjs";
+
+const { autoUpdater } = updaterPkg;
 
 let win = null;
 let port = null;
@@ -74,6 +77,37 @@ function createWindow(openPath) {
   });
 }
 
+// Auto-update from GitHub Releases via electron-updater. For a PRIVATE repo the
+// installed app must hold a read token (REDLINE_UPDATE_TOKEN / GH_TOKEN) to read
+// the release feed; without it, checks fail silently and the app stays put.
+function setupUpdater() {
+  if (!app.isPackaged) {
+    console.log("[updater] dev mode — update checks disabled");
+    return;
+  }
+  const token = process.env.REDLINE_UPDATE_TOKEN || process.env.GH_TOKEN || process.env.GITHUB_TOKEN || "";
+  if (token) autoUpdater.setFeedURL({ provider: "github", owner: "timlcode", repo: "redline", token });
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on("update-downloaded", (info) => {
+    dialog
+      .showMessageBox({
+        type: "info",
+        title: "Redline update ready",
+        message: `Version ${info.version} has been downloaded. Restart to install it.`,
+        buttons: ["Restart now", "Later"],
+        defaultId: 0,
+      })
+      .then(({ response }) => {
+        if (response === 0) autoUpdater.quitAndInstall();
+      });
+  });
+  autoUpdater.on("error", (e) => console.log("[updater]", e && e.message ? e.message : e));
+  const check = () => autoUpdater.checkForUpdatesAndNotify().catch((e) => console.log("[updater]", e && e.message ? e.message : e));
+  check();
+  setInterval(check, 4 * 60 * 60 * 1000); // every 4 hours
+}
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
@@ -91,6 +125,7 @@ if (!gotLock) {
   app.whenReady().then(async () => {
     port = await startServer();
     createWindow(fileArg(process.argv));
+    setupUpdater();
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow(null);
     });
