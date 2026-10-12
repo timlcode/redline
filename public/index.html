@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Redline</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand"><img src="/icon.svg" alt=""><span>REDLINE</span></div>
+  <div class="group">
+    <button id="btn-open" title="Open a PDF (Ctrl+O)">Open</button>
+    <button id="btn-save" title="Save (Ctrl+S)" disabled>Save</button>
+    <button id="btn-saveas" title="Save As (Ctrl+Shift+S)" disabled>Save As</button>
+    <button id="btn-send" title="Send by email, Telegram or LocalSend (Ctrl+E)" disabled>Send</button>
+    <button id="btn-ocr" title="Read every scanned page so the whole document can be searched (Ctrl+Shift+O)" disabled>Read all</button>
+    <button id="btn-find" title="Find text (Ctrl+F)" disabled>Find</button>
+    <button id="btn-comments" title="Comment list (Ctrl+Shift+M)" disabled>Comments</button>
+  </div>
+  <div class="group">
+    <button id="btn-undo" title="Undo (Ctrl+Z)" disabled>&#x21B6; Undo</button>
+    <button id="btn-redo" title="Redo (Ctrl+Shift+Z)" disabled>&#x21B7;</button>
+  </div>
+  <div class="docname"><span id="dirty" class="dirty" title="Unsaved changes" hidden></span><span id="docname">No file</span></div>
+  <div class="group needs-doc">
+    <button id="btn-prev" title="Previous page (PgUp)">&lsaquo;</button>
+    <span id="pageind" class="ind">– / –</span>
+    <button id="btn-next" title="Next page (PgDn)">&rsaquo;</button>
+    <span id="textkind" class="chip" hidden></span>
+  </div>
+  <div class="group needs-doc">
+    <button id="btn-zout" title="Zoom out (Ctrl+-)">−</button>
+    <button id="zoomind" class="ind" title="Fit width">100%</button>
+    <button id="btn-zin" title="Zoom in (Ctrl+=)">+</button>
+  </div>
+  <div class="group needs-doc">
+    <button id="btn-rotl" title="Rotate page left">&#x27F2;</button>
+    <button id="btn-rotr" title="Rotate page right">&#x27F3;</button>
+    <button id="btn-insert" title="Insert a blank page after this one">Insert</button>
+    <button id="btn-delete" title="Delete this page">Delete</button>
+    <div class="menuwrap">
+      <button id="btn-pages" title="Combine, insert from file, extract, split">Pages &#x25BE;</button>
+      <div id="pages-menu" class="menu" hidden>
+        <button data-act="insert-file">Insert from file&hellip;</button>
+        <button data-act="combine">Combine files into new&hellip;</button>
+        <div class="menu-sep"></div>
+        <button data-act="extract">Extract pages&hellip;</button>
+        <button data-act="split">Split document&hellip;</button>
+        <button data-act="delete-many">Delete pages&hellip;</button>
+      </div>
+    </div>
+    <button id="btn-up" title="Move page up">&#x25B2;</button>
+    <button id="btn-down" title="Move page down">&#x25BC;</button>
+  </div>
+  <div id="status" class="status" role="status"></div>
+</header>
+
+<div id="findbar" class="findbar" hidden>
+  <input id="find-q" type="search" placeholder="Find in document" autocomplete="off" spellcheck="false">
+  <span id="find-count" class="ind"></span>
+  <button id="find-prev" title="Previous match (Shift+Enter)">&lsaquo;</button>
+  <button id="find-next" title="Next match (Enter)">&rsaquo;</button>
+  <button id="find-copy" title="Copy the text of this page">Copy page text</button>
+  <span id="find-unread" class="unread" hidden><span id="find-unread-n"></span> <button id="find-readall">Read all</button></span>
+  <button id="find-close" class="x" title="Close (Esc)">&times;</button>
+</div>
+<div id="main">
+  <nav id="rail" class="needs-doc">
+    <div class="rail-label">Tools</div>
+    <button class="tool active" data-tool="select" title="Select, move, delete (V)"><kbd>V</kbd>Select</button>
+    <button class="tool" data-tool="highlight" title="Highlight text or an area (H)"><kbd>H</kbd>Highlight</button>
+    <button class="tool" data-tool="underline" title="Underline text (U)"><kbd>U</kbd>Underline</button>
+    <button class="tool" data-tool="strikeout" title="Strike out text (K)"><kbd>K</kbd>Strikeout</button>
+    <button class="tool" data-tool="note" title="Sticky note (N)"><kbd>N</kbd>Note</button>
+    <button class="tool" data-tool="text" title="Text box (T)"><kbd>T</kbd>Text</button>
+    <button class="tool" data-tool="pen" title="Freehand pen (P)"><kbd>P</kbd>Pen</button>
+    <button class="tool" data-tool="line" title="Line (L)"><kbd>L</kbd>Line</button>
+    <button class="tool" data-tool="arrow" title="Arrow (A)"><kbd>A</kbd>Arrow</button>
+    <button class="tool" data-tool="box" title="Rectangle (B)"><kbd>B</kbd>Box</button>
+    <button class="tool" data-tool="cloud" title="Revision cloud: drag a rectangle (C), or switch to polygon cloud"><kbd>C</kbd>Cloud</button>
+    <button class="tool" data-tool="polygon" title="Polygon: click points, double-click to finish (G)"><kbd>G</kbd>Polygon</button>
+    <button class="tool" data-tool="polyline" title="Polyline: click points, double-click to finish (Y)"><kbd>Y</kbd>Polyline</button>
+    <button class="tool" data-tool="callout" title="Callout: click the arrow tip, then drag a text box (Q)"><kbd>Q</kbd>Callout</button>
+    <button class="tool" data-tool="measure" title="Measure distance or area (M)"><kbd>M</kbd>Measure</button>
+    <button class="tool" data-tool="stamp" title="Stamp (S)"><kbd>S</kbd>Stamp</button>
+    <div id="measureopt" class="stamps" hidden>
+      <button id="m-distance" class="stamp active">Distance</button>
+      <button id="m-area" class="stamp">Area</button>
+      <button id="m-calibrate" class="stamp">Calibrate scale…</button>
+      <div class="stamp-sep"></div>
+      <div id="m-scale" class="m-scale">No scale set</div>
+      <div class="stamp-sep"></div>
+      <label class="m-preset">Scale
+        <select id="m-preset">
+          <option value="">Pick a scale…</option>
+          <optgroup label="Architectural">
+            <option value="12:12">1:1 (full size)</option>
+            <option value="1:24">1:2 (1/2 full)</option>
+            <option value="1:48">1:4 (1/4 full)</option>
+            <option value="1:96">1:8 (1/8 full)</option>
+            <option value="8:12">1 1/2″ = 1′</option>
+            <option value="4:12">3″ = 1′</option>
+            <option value="2:12">6″ = 1′</option>
+            <option value="1:1">1″ = 1′</option>
+            <option value="0.75:12">3/4″ = 1′</option>
+            <option value="0.375:12">3/8″ = 1′</option>
+            <option value="0.25:12">1/4″ = 1′</option>
+            <option value="0.1875:12">3/16″ = 1′</option>
+            <option value="0.125:12">1/8″ = 1′</option>
+            <option value="0.0625:12">1/16″ = 1′</option>
+          </optgroup>
+          <optgroup label="Engineering">
+            <option value="1:120">1″ = 10′</option>
+            <option value="1:240">1″ = 20′</option>
+            <option value="1:360">1″ = 30′</option>
+            <option value="1:480">1″ = 40′</option>
+            <option value="1:600">1″ = 50′</option>
+            <option value="1:720">1″ = 60′</option>
+            <option value="1:1200">1″ = 100′</option>
+            <option value="1:2400">1″ = 200′</option>
+          </optgroup>
+          <optgroup label="Metric">
+            <option value="1:100m">1:100</option>
+            <option value="1:200m">1:200</option>
+            <option value="1:500m">1:500</option>
+            <option value="1:50m">1:50</option>
+            <option value="1:20m">1:20</option>
+            <option value="1:1000m">1:1000</option>
+          </optgroup>
+        </select>
+      </label>
+    </div>
+    <div id="cloudopt" class="stamps" hidden>
+      <button id="cloud-rect" class="stamp active">Rectangle</button>
+      <button id="cloud-poly" class="stamp">Polygon</button>
+    </div>
+    <div id="stamps" class="stamps" hidden>
+      <button class="stamp active" data-stamp="APPROVED">APPROVED</button>
+      <button class="stamp" data-stamp="REVISE">REVISE</button>
+      <button class="stamp" data-stamp="REJECT">REJECT</button>
+      <button class="stamp" data-stamp="FOR REVIEW">FOR REVIEW</button>
+      <div class="stamp-sep"></div>
+      <div id="custom-stamps"></div>
+      <button id="stamp-add">+ Custom text…</button>
+      <button id="stamp-image">+ Image…</button>
+    </div>
+    <div class="rail-label">Color</div>
+    <div class="swatches">
+      <button class="swatch" data-color="yellow" title="Yellow" style="--c:#ffd900"></button>
+      <button class="swatch" data-color="red" title="Red" style="--c:#e10600"></button>
+      <button class="swatch" data-color="green" title="Green" style="--c:#1a9e33"></button>
+      <button class="swatch" data-color="blue" title="Blue" style="--c:#1a59f2"></button>
+    </div>
+  </nav>
+  <aside id="thumbs" class="needs-doc"></aside>
+  <aside id="comments" class="comments" hidden>
+    <div class="cm-head">
+      <b>Comments</b>
+      <span id="cm-count" class="ind"></span>
+      <button id="cm-close" class="x" title="Close">&times;</button>
+    </div>
+    <div class="cm-tools">
+      <input id="cm-filter" type="search" placeholder="Filter comments" autocomplete="off">
+      <label class="check"><input id="cm-thispage" type="checkbox"> This page</label>
+    </div>
+    <div class="cm-tools">
+      <span class="cm-author" title="Your name on comments. Click to change.">by <b id="cm-author"></b></span>
+      <button id="cm-export-csv" title="Save a CSV of every comment">CSV</button>
+      <button id="cm-export-pdf" title="Save a printable comment summary PDF">Summary PDF</button>
+    </div>
+    <div id="cm-list" class="cm-list"></div>
+  </aside>
+  <section id="viewer">
+    <div id="empty" class="empty">
+      <div class="empty-inner">
+        <img src="/icon.svg" alt="">
+        <button id="btn-open-empty" class="primary">Open a PDF</button>
+        <p>or drop a PDF anywhere in this window</p>
+      </div>
+    </div>
+    <div id="pagewrap" hidden>
+      <img id="pageimg" alt="" draggable="false">
+      <canvas id="overlay"></canvas>
+      <div id="seltools" class="seltools" hidden>
+        <button data-act="highlight" title="Highlight selection">Highlight</button>
+        <button data-act="underline" title="Underline selection">Underline</button>
+        <button data-act="strikeout" title="Strike out selection">Strikeout</button>
+        <button data-act="copy" title="Copy selection (Ctrl+C)">Copy</button>
+      </div>
+      <div id="popover" class="popover" hidden>
+        <textarea id="pop-text" rows="3" placeholder="Type here"></textarea>
+        <div class="pop-actions">
+          <span class="hint">Ctrl+Enter</span>
+          <button id="pop-cancel">Cancel</button>
+          <button id="pop-ok" class="primary">Add</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+<div id="pagesmodal" class="modal-back" hidden>
+  <div class="modal" role="dialog" aria-labelledby="pg-title">
+    <div class="modal-head"><span id="pg-title">Pages</span><button id="pg-close" class="x" title="Close (Esc)">&times;</button></div>
+    <div class="pane" data-pg="insert-file" hidden>
+      <p class="lead">Add pages from other PDFs or from images (JPEG, PNG, TIFF). Each image becomes a page.</p>
+      <div class="filelist" id="pg-files"></div>
+      <div class="row"><button id="pg-pick-files">Choose files&hellip;</button><span class="hint">or drop files onto the window</span></div>
+      <label>Insert <select id="pg-where"><option value="after">after this page</option><option value="before">before this page</option><option value="end">at the end</option><option value="start">at the start</option></select></label>
+      <label>Pages to take (single PDF only) <input id="pg-take" type="text" placeholder="all, or e.g. 1-3, 5"></label>
+    </div>
+    <div class="pane" data-pg="combine" hidden>
+      <p class="lead">Make a new document from several files, in the order listed. The current document is left as it is.</p>
+      <div class="filelist" id="pg-cfiles"></div>
+      <div class="row"><button id="pg-pick-cfiles">Choose files&hellip;</button></div>
+    </div>
+    <div class="pane" data-pg="extract" hidden>
+      <p class="lead">Copy pages into a new PDF.</p>
+      <label>Pages <input id="pg-xpages" type="text" placeholder="e.g. 1-3, 5"></label>
+      <label class="check"><input id="pg-xremove" type="checkbox"> Remove them from this document afterwards</label>
+    </div>
+    <div class="pane" data-pg="split" hidden>
+      <p class="lead">Write this document out as several PDFs, in a folder you choose.</p>
+      <label>Split <select id="pg-smode"><option value="every">every N pages</option><option value="each">one page per file</option><option value="ranges">by page ranges</option></select></label>
+      <label id="pg-severy-l">Pages per file <input id="pg-severy" type="number" min="1" value="1"></label>
+      <label id="pg-sranges-l" hidden>Ranges, one file each <input id="pg-sranges" type="text" placeholder="e.g. 1-3, 4-6, 7-"></label>
+      <label>File name prefix <input id="pg-sbase" type="text"></label>
+    </div>
+    <div class="pane" data-pg="delete-many" hidden>
+      <p class="lead">Delete several pages at once.</p>
+      <label>Pages <input id="pg-dpages" type="text" placeholder="e.g. 2, 5-7"></label>
+    </div>
+    <div class="modal-foot"><span id="pg-msg" class="send-msg"></span><button id="pg-cancel">Cancel</button><button id="pg-go" class="primary">Go</button></div>
+  </div>
+</div>
+<div id="dropmodal" class="modal-back" hidden>
+  <div class="modal" role="dialog">
+    <div class="modal-head"><span>Dropped <b id="drop-name"></b></span><button id="drop-close" class="x" title="Close (Esc)">&times;</button></div>
+    <div class="pane">
+      <p class="lead">A document is already open. What should happen with the dropped file(s)?</p>
+      <div class="row wrap">
+        <button id="drop-open" class="primary">Open instead</button>
+        <button id="drop-after">Insert after this page</button>
+        <button id="drop-end">Append at the end</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="sendmodal" class="modal-back" hidden>
+  <div class="modal" role="dialog" aria-labelledby="send-title">
+    <div class="modal-head">
+      <span id="send-title">Send <b id="send-name"></b></span>
+      <button id="send-close" class="x" title="Close (Esc)">&times;</button>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-via="email">Email</button>
+      <button class="tab" data-via="mac">Parker / Bishop</button>
+      <button class="tab" data-via="telegram">Telegram</button>
+      <button class="tab" data-via="localsend">LocalSend</button>
+    </div>
+    <div class="pane" data-pane="email">
+      <p class="lead">Opens a new message from <b id="em-from">your work account</b> with this PDF attached. Add recipients and write the message there.</p>
+      <div id="email-setup" class="notice" hidden>
+        <span id="email-reason"></span>
+        <button id="email-setup-btn">Open Thunderbird</button>
+        <button id="email-recheck">Check again</button>
+      </div>
+      <label>Subject <input id="em-subject" type="text"></label>
+    </div>
+    <div class="pane" data-pane="mac" hidden>
+      <p class="lead">Copies the PDF straight into <b>Downloads</b> on the Mac over Tailscale. Nothing to accept on the other end.</p>
+      <div id="mac-list" class="ls-list"></div>
+    </div>
+    <div class="pane" data-pane="telegram" hidden>
+      <div class="from">To <span id="tg-to">You (Hermes bot chat)</span></div>
+      <label>Caption <textarea id="tg-caption" rows="3" placeholder="optional"></textarea></label>
+      <p class="hint">Lands in your chat with the Hermes bot; forward it from there. For Parker or Bishop, use the Parker / Bishop tab (Telegram bots can't message each other).</p>
+    </div>
+    <div class="pane" data-pane="localsend" hidden>
+      <div class="ls-head">
+        <span id="ls-state">Looking for devices…</span>
+        <button id="ls-refresh">Refresh</button>
+      </div>
+      <div id="ls-list" class="ls-list"></div>
+      <p class="hint">Accept the file on the receiving device. For the Macs, Redline starts LocalSend for you if it's closed.</p>
+    </div>
+    <div class="modal-foot">
+      <span id="send-msg" class="send-msg"></span>
+      <button id="send-cancel">Cancel</button>
+      <button id="send-go" class="primary">Send</button>
+    </div>
+  </div>
+</div>
+<input id="filein" type="file" accept="application/pdf,.pdf" hidden>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

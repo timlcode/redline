@@ -1,0 +1,17 @@
+{
+  "name": "redline",
+  "version": "0.9.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/pdf.test.mjs test/ocr.test.mjs test/edit.test.mjs test/pages.test.mjs test/comments.test.mjs test/shapes.test.mjs test/measure.test.mjs"
+  },
+  "dependencies": {
+    "mupdf": "1.28.1",
+    "onnxruntime-node": "^1.30.0"
+  },
+  "devDependencies": {
+    "pngjs": "^7.0.0"
+  }
+}
