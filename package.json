@@ -3,15 +3,60 @@
   "version": "0.9.1",
   "private": true,
   "type": "module",
+  "main": "electron/main.mjs",
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test test/pdf.test.mjs test/ocr.test.mjs test/edit.test.mjs test/pages.test.mjs test/comments.test.mjs test/shapes.test.mjs test/measure.test.mjs"
+    "electron": "electron .",
+    "test": "node --test test/pdf.test.mjs test/ocr.test.mjs test/edit.test.mjs test/pages.test.mjs test/comments.test.mjs test/shapes.test.mjs test/measure.test.mjs",
+    "dist": "electron-builder",
+    "dist:linux": "electron-builder --linux",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win"
   },
   "dependencies": {
     "mupdf": "1.28.1",
     "onnxruntime-node": "^1.30.0"
   },
   "devDependencies": {
+    "electron": "^44.7.0",
+    "electron-builder": "^26.15.3",
     "pngjs": "^7.0.0"
+  },
+  "build": {
+    "appId": "com.waycd.redline",
+    "productName": "Redline",
+    "asar": false,
+    "afterPack": "scripts/after-pack.mjs",
+    "files": [
+      "server.mjs",
+      "lib/**",
+      "public/**",
+      "models/**",
+      "electron/**",
+      "assets/**",
+      "scripts/**",
+      "package.json",
+      "!test/**",
+      "!bin/**",
+      "!dist/**"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Graphics",
+      "icon": "assets/redline-512.png",
+      "artifactName": "Redline-${version}-${arch}.${ext}"
+    },
+    "mac": {
+      "target": ["dmg"],
+      "category": "public.app-category.productivity",
+      "icon": "assets/redline-512.png"
+    },
+    "win": {
+      "target": ["nsis"],
+      "icon": "assets/redline-256.png"
+    }
   }
 }

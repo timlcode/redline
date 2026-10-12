@@ -232,6 +232,7 @@ export function createServer(opts = {}) {
   }
 
   function runPicker(mode, pickOpts = {}) {
+    if (opts.pick) return Promise.resolve(opts.pick(mode, pickOpts));
     if (opts.pickCommand === false) return Promise.reject(P.httpError(501, "Picker disabled"));
     const suggest = pickOpts.suggest;
     const cmd = opts.pickCommand || [fs.existsSync("/usr/bin/python3") ? "/usr/bin/python3" : "python3", path.join(APP_DIR, "bin/pick-file.py")];
