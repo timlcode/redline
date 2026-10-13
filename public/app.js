@@ -37,7 +37,7 @@ const st = {
 };
 
 const viewer = $("#viewer");
-const img = $("#pageimg");
+const tiles = $("#pagetiles");
 const canvas = $("#overlay");
 const ctx = canvas.getContext("2d");
 const wrap = $("#pagewrap");
@@ -71,6 +71,7 @@ async function api(method, path, body, raw) {
   if (!res.ok) {
     const e = new Error((data && data.error) || `${res.status} ${res.statusText}`);
     e.status = res.status;
+    e.code = data && data.code;
     throw e;
   }
   return data;
@@ -105,6 +106,7 @@ function setDoc(summary, page) {
   wrap.hidden = false;
   $("#btn-save").disabled = false;
   $("#btn-saveas").disabled = false;
+  $("#btn-protect").disabled = false;
   $("#btn-send").disabled = false;
   $("#btn-ocr").disabled = false;
   $("#btn-find").disabled = false;
@@ -135,6 +137,30 @@ function updateChrome() {
   $("#btn-redo").disabled = !d?.canRedo;
   $("#btn-undo").title = d?.undoLabel ? `Undo ${d.undoLabel} (Ctrl+Z)` : "Undo (Ctrl+Z)";
   $("#btn-redo").title = d?.redoLabel ? `Redo ${d.redoLabel} (Ctrl+Shift+Z)` : "Redo (Ctrl+Shift+Z)";
+  const chip = $("#protchip");
+  const prot = d?.protection;
+  if (!d || (!prot?.encrypted && !pendingProtection)) {
+    chip.hidden = true;
+  } else if (pendingProtection?.mode === "password") {
+    chip.hidden = false;
+    chip.className = "chip busy";
+    chip.textContent = "Protect on save";
+    chip.title = "A password will be applied the next time this file is saved";
+  } else if (pendingProtection?.mode === "none") {
+    chip.hidden = false;
+    chip.className = "chip";
+    chip.textContent = "Unlock on save";
+    chip.title = "Protection will be removed the next time this file is saved";
+  } else {
+    chip.hidden = false;
+    chip.className = "chip text";
+    const bits = [];
+    if (!prot.print) bits.push("no print");
+    if (!prot.copy) bits.push("no copy");
+    if (!prot.edit) bits.push("no edit");
+    chip.textContent = prot.userPassword ? "Password" : "Restricted";
+    chip.title = [prot.method, bits.join(", ")].filter(Boolean).join(" · ");
+  }
   $$(".thumb").forEach((t) => t.classList.toggle("active", Number(t.dataset.page) === st.page));
   updateKindChip();
 }
@@ -161,12 +187,16 @@ async function loadKinds() {
 // ---------- rendering ----------
 
 let imgTimer = null;
+// Device-pixel tiles. Keep the grid in sync with VIEW_TILE / tilesCovering in lib/pdf.mjs.
+const TILE = 512;
+let tileGen = 0;
+
 function layoutPage() {
   const { w, h } = pageSize();
   const cw = Math.round(w * st.zoom);
   const ch = Math.round(h * st.zoom);
-  img.style.width = `${cw}px`;
-  img.style.height = `${ch}px`;
+  wrap.style.width = `${cw}px`;
+  wrap.style.height = `${ch}px`;
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.round(cw * dpr);
   canvas.height = Math.round(ch * dpr);
@@ -176,23 +206,72 @@ function layoutPage() {
   drawOverlay();
 }
 
+function tilesCovering(pageW, pageH, view) {
+  const x0 = Math.max(0, view.x);
+  const y0 = Math.max(0, view.y);
+  const x1 = Math.min(pageW, view.x + view.w);
+  const y1 = Math.min(pageH, view.y + view.h);
+  const out = [];
+  if (!(x1 > x0 && y1 > y0)) return out;
+  const gx0 = Math.floor(x0 / TILE) * TILE;
+  const gy0 = Math.floor(y0 / TILE) * TILE;
+  for (let y = gy0; y < y1; y += TILE) {
+    for (let x = gx0; x < x1; x += TILE) {
+      const tw = Math.min(TILE, pageW - x);
+      const th = Math.min(TILE, pageH - y);
+      if (tw > 0 && th > 0) out.push({ x, y, w: tw, h: th });
+    }
+  }
+  return out;
+}
+
+function paintTiles() {
+  if (!st.doc) return;
+  const gen = ++tileGen;
+  const dpr = window.devicePixelRatio || 1;
+  const z = Number(Math.min(4, Math.max(0.25, st.zoom * dpr)).toFixed(3));
+  const { w, h } = pageSize();
+  const pw = Math.max(1, Math.ceil(w * z));
+  const ph = Math.max(1, Math.ceil(h * z));
+  const vr = viewer.getBoundingClientRect();
+  const wr = wrap.getBoundingClientRect();
+  const left = Math.max(0, vr.left - wr.left);
+  const top = Math.max(0, vr.top - wr.top);
+  const right = Math.min(wr.width, Math.max(left, vr.right - wr.left));
+  const bottom = Math.min(wr.height, Math.max(top, vr.bottom - wr.top));
+  const view = {
+    x: left * dpr - TILE,
+    y: top * dpr - TILE,
+    w: Math.max(0, right - left) * dpr + TILE * 2,
+    h: Math.max(0, bottom - top) * dpr + TILE * 2,
+  };
+  const need = tilesCovering(pw, ph, view);
+  const keep = new Set();
+  for (const t of need) {
+    const key = `${st.page}:${z}:${t.x}:${t.y}:${t.w}:${t.h}:${st.rev}`;
+    keep.add(key);
+    if (tiles.querySelector(`img[data-key="${key}"]`)) continue;
+    const im = document.createElement("img");
+    im.dataset.key = key;
+    im.alt = "";
+    im.draggable = false;
+    im.style.left = `${t.x / dpr}px`;
+    im.style.top = `${t.y / dpr}px`;
+    im.style.width = `${t.w / dpr}px`;
+    im.style.height = `${t.h / dpr}px`;
+    im.onerror = () => { if (gen === tileGen) status("Could not render page", true); };
+    im.src = `/api/page/${st.page}/tile?zoom=${z}&x=${t.x}&y=${t.y}&w=${t.w}&h=${t.h}&v=${st.rev}`;
+    tiles.append(im);
+  }
+  for (const el of [...tiles.querySelectorAll("img")]) if (!keep.has(el.dataset.key)) el.remove();
+}
+
 function loadPageImage(immediate = true) {
   if (!st.doc) return;
   layoutPage();
   clearTimeout(imgTimer);
-  const go = () => {
-    const dpr = window.devicePixelRatio || 1;
-    const z = Math.min(4, Math.max(0.25, st.zoom * dpr));
-    const url = `/api/page/${st.page}?zoom=${z.toFixed(3)}&v=${st.rev}`;
-    const pre = new Image();
-    pre.onload = () => {
-      img.src = url;
-    };
-    pre.onerror = () => status("Could not render page", true);
-    pre.src = url;
-  };
-  if (immediate) go();
-  else imgTimer = setTimeout(go, 140);
+  if (immediate) paintTiles();
+  else imgTimer = setTimeout(paintTiles, 80);
 }
 
 async function loadAnnots() {
@@ -206,30 +285,48 @@ async function loadAnnots() {
   }
 }
 
+let thumbObserver = null;
+function thumbURL(i) {
+  return `/api/thumbs/${i}?v=${st.rev}`;
+}
+function armThumb(im) {
+  if (!im || im.getAttribute("src") || !im.dataset.src) return;
+  im.src = im.dataset.src;
+}
 function buildThumbs() {
   const box = $("#thumbs");
   box.textContent = "";
+  if (thumbObserver) thumbObserver.disconnect();
   if (!st.doc) return;
+  thumbObserver = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      armThumb(e.target.querySelector("img"));
+    }
+  }, { root: box, rootMargin: "240px 0px" });
   for (let i = 0; i < st.doc.pageCount; i++) {
     const t = document.createElement("div");
     t.className = "thumb";
     t.dataset.page = i;
     const im = document.createElement("img");
-    im.loading = "lazy";
     im.alt = `Page ${i + 1}`;
-    im.src = `/api/thumbs/${i}?v=${st.rev}`;
+    im.dataset.src = thumbURL(i);
     const lab = document.createElement("span");
     lab.textContent = i + 1;
     t.append(im, lab);
     t.addEventListener("click", () => gotoPage(i));
     box.append(t);
+    thumbObserver.observe(t);
   }
+  armThumb($(`.thumb[data-page="${st.page}"] img`));
   updateChrome();
 }
 
 function refreshThumb(i) {
   const im = $(`.thumb[data-page="${i}"] img`);
-  if (im) im.src = `/api/thumbs/${i}?v=${st.rev}`;
+  if (!im) return;
+  im.dataset.src = thumbURL(i);
+  if (im.getAttribute("src")) im.src = im.dataset.src;
 }
 
 function showPage() {
@@ -843,17 +940,81 @@ popText.addEventListener("keydown", (ev) => {
 
 // ---------- open / save ----------
 
+let pendingProtection = null;
+const pwModal = $("#pwmodal");
+const protModal = $("#protmodal");
+
+function wipeProtection(p) {
+  if (!p) return;
+  p.userPassword = "";
+  p.ownerPassword = "";
+}
+
+function clearPasswordFields() {
+  for (const id of ["pw-input", "prot-open", "prot-open2", "prot-owner"]) {
+    const el = $(`#${id}`);
+    if (el) el.value = "";
+  }
+}
+
+let pwWait = null;
+function askPassword({ lead, invalid }) {
+  return new Promise((resolve) => {
+    pwWait = resolve;
+    $("#pw-lead").textContent = lead;
+    $("#pw-err").hidden = !invalid;
+    clearPasswordFields();
+    pwModal.hidden = false;
+    $("#pw-input").focus();
+  });
+}
+function finishPassword(value) {
+  pwModal.hidden = true;
+  clearPasswordFields();
+  const resolve = pwWait;
+  pwWait = null;
+  if (resolve) resolve(value);
+}
+
+function isPasswordError(e) {
+  return e && e.status === 401 && (e.code === "password" || e.code === "password-required");
+}
+
 async function openPath(p) {
   status("Opening…");
-  const s = await guarded(() => api("POST", "/api/open", { path: p }));
-  if (!s) return;
-  onOpened(s);
-  status(`Opened ${s.name}`);
+  let password;
+  for (;;) {
+    let s;
+    try {
+      s = await api("POST", "/api/open", password === undefined ? { path: p } : { path: p, password });
+    } catch (e) {
+      password = undefined;
+      if (!isPasswordError(e)) {
+        status(e.message, true);
+        return;
+      }
+      const again = e.code === "password";
+      const entered = await askPassword({
+        lead: again ? "That password did not open the file. Try again." : "This PDF needs a password to open.",
+        invalid: again,
+      });
+      if (entered == null) {
+        status("Open cancelled");
+        return;
+      }
+      password = entered;
+      continue;
+    }
+    password = undefined;
+    if (!onOpened(s)) status(`Opened ${s.name}`);
+    return;
+  }
 }
 
 function onOpened(s) {
   st.rev++;
   cm.items = null;
+  pendingProtection = null;
   st.zoom = 1;
   st.kinds = [];
   closeFind();
@@ -862,20 +1023,49 @@ function onOpened(s) {
   buildThumbs();
   fitWidth();
   showPage();
+  if (s.protection?.encrypted && !s.protection.userPassword) {
+    const bits = [];
+    if (!s.protection.print) bits.push("printing");
+    if (!s.protection.copy) bits.push("copying");
+    if (!s.protection.edit) bits.push("editing");
+    status(bits.length ? `Opened with restrictions (${bits.join(", ")} off)` : "Opened a protected PDF");
+    return true;
+  }
+  return false;
 }
 
 async function uploadFile(file) {
   if (!file) return;
   status("Opening…");
-  const s = await guarded(() =>
-    api("POST", "/api/open-upload", undefined, {
-      body: file,
-      headers: { "Content-Type": "application/pdf", "X-Filename": encodeURIComponent(file.name) },
-    }),
-  );
-  if (!s) return;
-  onOpened(s);
-  status(`Opened ${s.name} (upload – Save will download a copy)`);
+  let password;
+  for (;;) {
+    const headers = { "Content-Type": "application/pdf", "X-Filename": encodeURIComponent(file.name) };
+    if (password !== undefined) headers["X-Password"] = encodeURIComponent(password);
+    let s;
+    try {
+      s = await api("POST", "/api/open-upload", undefined, { body: file, headers });
+    } catch (e) {
+      password = undefined;
+      if (!isPasswordError(e)) {
+        status(e.message, true);
+        return;
+      }
+      const again = e.code === "password";
+      const entered = await askPassword({
+        lead: again ? "That password did not open the file. Try again." : "This PDF needs a password to open.",
+        invalid: again,
+      });
+      if (entered == null) {
+        status("Open cancelled");
+        return;
+      }
+      password = entered;
+      continue;
+    }
+    password = undefined;
+    if (!onOpened(s)) status(s.sourcePath ? `Opened ${s.name}` : `Opened ${s.name} (upload – Save will download a copy)`);
+    return;
+  }
 }
 
 async function doOpen() {
@@ -888,45 +1078,223 @@ async function doOpen() {
   }
 }
 
-function download() {
+let protWait = null;
+
+function syncProtFields() {
+  const mode = document.querySelector('input[name="prot-mode"]:checked')?.value;
+  $("#prot-fields").hidden = mode !== "password";
+}
+
+function askProtection({ purpose }) {
+  return new Promise((resolve) => {
+    protWait = resolve;
+    const encrypted = !!st.doc?.protection?.encrypted;
+    $("#prot-title").textContent = purpose === "save" ? "Save protection" : "Protect with password";
+    $("#prot-ok").textContent = purpose === "save" ? "Save" : "Apply";
+    $("#prot-lead").textContent = purpose === "save"
+      ? "This file is protected. Choose what to write."
+      : "Set a password, change permissions, or remove protection. This takes effect the next time you save.";
+    $("#prot-keep-l").hidden = !encrypted;
+    const mode = purpose === "save" && encrypted ? "keep" : "password";
+    for (const el of document.querySelectorAll('input[name="prot-mode"]')) el.checked = el.value === mode;
+    const p = st.doc?.protection;
+    $("#prot-print").checked = !p || p.print !== false;
+    $("#prot-copy").checked = !p || p.copy !== false;
+    $("#prot-edit").checked = !p || p.edit !== false;
+    $("#prot-err").hidden = true;
+    clearPasswordFields();
+    syncProtFields();
+    protModal.hidden = false;
+    if (mode === "password") $("#prot-open").focus();
+  });
+}
+
+function finishProtection(value) {
+  protModal.hidden = true;
+  clearPasswordFields();
+  const resolve = protWait;
+  protWait = null;
+  if (resolve) resolve(value);
+}
+
+function readProtectionForm() {
+  const mode = document.querySelector('input[name="prot-mode"]:checked')?.value || "keep";
+  if (mode !== "password") return { mode };
+  const userPassword = $("#prot-open").value;
+  const again = $("#prot-open2").value;
+  const ownerPassword = $("#prot-owner").value;
+  const print = $("#prot-print").checked;
+  const copy = $("#prot-copy").checked;
+  const edit = $("#prot-edit").checked;
+  if (userPassword !== again) return { error: "Open password does not match." };
+  const restricted = !print || !copy || !edit;
+  if (!userPassword && !restricted) return { error: "Enter an open password, or turn off a permission." };
+  if (restricted && !ownerPassword) return { error: "Enter a permissions password to enforce those restrictions." };
+  if (restricted && ownerPassword === userPassword) return { error: "The permissions password must be different from the open password." };
+  const enc = new TextEncoder();
+  if (enc.encode(userPassword).length > 127 || enc.encode(ownerPassword).length > 127) return { error: "Password is too long." };
+  return { mode: "password", userPassword, ownerPassword, print, copy, edit };
+}
+
+async function download(protection) {
+  const mode = protection?.mode || "keep";
+  if (mode === "keep") {
+    const a = document.createElement("a");
+    a.href = `/api/download?v=${Date.now()}`;
+    a.download = st.doc?.name || "redline.pdf";
+    document.body.append(a);
+    a.click();
+    a.remove();
+    status("Downloaded a copy");
+    return true;
+  }
+  const res = await fetch("/api/download", {
+    method: "POST",
+    headers: { "X-Redline": "1", "Content-Type": "application/json" },
+    body: JSON.stringify({ protection }),
+  });
+  const ct = res.headers.get("content-type") || "";
+  if (!res.ok) {
+    let msg = `${res.status}`;
+    if (ct.includes("json")) {
+      const data = await res.json();
+      msg = data.error || msg;
+    }
+    status(msg, true);
+    return false;
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = `/api/download?v=${Date.now()}`;
+  a.href = url;
   a.download = st.doc?.name || "redline.pdf";
   document.body.append(a);
   a.click();
   a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+  if (st.doc) {
+    st.doc.protection = {
+      encrypted: mode === "password",
+      method: mode === "password" ? "AES-256" : null,
+      print: protection.print !== false,
+      copy: protection.copy !== false,
+      edit: protection.edit !== false,
+      userPassword: !!protection.userPassword,
+    };
+  }
   status("Downloaded a copy");
+  return true;
+}
+
+async function runSave(fn) {
+  if (!st.doc) return;
+  let picked;
+  if (pendingProtection) picked = { protection: pendingProtection, fromPending: true };
+  else if (st.doc.protection?.encrypted) {
+    const protection = await askProtection({ purpose: "save" });
+    if (!protection) return;
+    picked = { protection, fromPending: false };
+  } else picked = { protection: { mode: "keep" }, fromPending: false };
+  let ok = false;
+  try {
+    ok = await fn(picked.protection);
+  } finally {
+    if (!picked.fromPending) wipeProtection(picked.protection);
+  }
+  if (ok && picked.fromPending) {
+    wipeProtection(pendingProtection);
+    pendingProtection = null;
+  }
+  if (ok) updateChrome();
 }
 
 async function doSave() {
-  if (!st.doc) return;
-  if (!st.doc.sourcePath) return download();
-  status("Saving…");
-  const r = await guarded(() => api("POST", "/api/save", {}));
-  if (r) {
+  await runSave(async (protection) => {
+    if (!st.doc.sourcePath) return download(protection);
+    status("Saving…");
+    const r = await guarded(() => api("POST", "/api/save", { protection }));
+    if (!r) return false;
+    if (r.protection) st.doc.protection = r.protection;
     setDirty(false);
     status(r.backup ? `Saved. Original kept as ${r.backup.split("/").pop()}` : "Saved");
-  }
+    return true;
+  });
 }
 
 async function doSaveAs() {
-  if (!st.doc) return;
-  let r;
-  try {
-    r = await api("POST", "/api/pick", { mode: "save" });
-  } catch {
-    return download();
-  }
-  if (!r.path) return;
-  status("Saving…");
-  const s = await guarded(() => api("POST", "/api/save-as", { path: r.path }));
-  if (s) {
+  await runSave(async (protection) => {
+    let r;
+    try {
+      r = await api("POST", "/api/pick", { mode: "save" });
+    } catch {
+      return download(protection);
+    }
+    if (!r.path) return false;
+    status("Saving…");
+    const s = await guarded(() => api("POST", "/api/save-as", { path: r.path, protection }));
+    if (!s) return false;
     st.doc.sourcePath = s.path;
     st.doc.name = s.path.split("/").pop();
+    if (s.protection) st.doc.protection = s.protection;
     setDirty(false);
     status(`Saved as ${st.doc.name}`);
-  }
+    return true;
+  });
 }
+
+async function doProtect() {
+  if (!st.doc) return;
+  const protection = await askProtection({ purpose: "protect" });
+  if (!protection) return;
+  wipeProtection(pendingProtection);
+  if (protection.mode === "keep") {
+    pendingProtection = null;
+    status("Keeping the current protection");
+  } else {
+    pendingProtection = protection;
+    setDirty(true);
+    status(protection.mode === "none" ? "Protection will be removed when you save" : "Password protection will be applied when you save");
+  }
+  updateChrome();
+}
+
+$("#pw-ok").addEventListener("click", () => finishPassword($("#pw-input").value));
+$("#pw-cancel").addEventListener("click", () => finishPassword(null));
+$("#pw-close").addEventListener("click", () => finishPassword(null));
+pwModal.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") {
+    ev.preventDefault();
+    ev.stopPropagation();
+    finishPassword(null);
+  } else if (ev.key === "Enter") {
+    ev.preventDefault();
+    ev.stopPropagation();
+    finishPassword($("#pw-input").value);
+  }
+});
+$("#prot-ok").addEventListener("click", () => {
+  const v = readProtectionForm();
+  if (v.error) {
+    $("#prot-err").hidden = false;
+    $("#prot-err").textContent = v.error;
+    return;
+  }
+  finishProtection(v);
+});
+$("#prot-cancel").addEventListener("click", () => finishProtection(null));
+$("#prot-close").addEventListener("click", () => finishProtection(null));
+protModal.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") {
+    ev.preventDefault();
+    ev.stopPropagation();
+    finishProtection(null);
+  } else if (ev.key === "Enter" && ev.target instanceof HTMLInputElement) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    $("#prot-ok").click();
+  }
+});
+for (const el of document.querySelectorAll('input[name="prot-mode"]')) el.addEventListener("change", syncProtFields);
 
 $("#filein").addEventListener("change", (ev) => {
   uploadFile(ev.target.files[0]);
@@ -981,6 +1349,7 @@ $("#btn-open").addEventListener("click", doOpen);
 $("#btn-open-empty").addEventListener("click", doOpen);
 $("#btn-save").addEventListener("click", doSave);
 $("#btn-saveas").addEventListener("click", doSaveAs);
+$("#btn-protect").addEventListener("click", doProtect);
 $("#btn-prev").addEventListener("click", () => gotoPage(st.page - 1));
 $("#btn-next").addEventListener("click", () => gotoPage(st.page + 1));
 $("#btn-zin").addEventListener("click", () => setZoom(st.zoom * 1.25, true));
@@ -1011,6 +1380,12 @@ $("#btn-down").addEventListener("click", () =>
   pageOp("/api/pages/move", { from: st.page, to: st.page + 1 }, "Moved page down"),
 );
 
+viewer.addEventListener("scroll", () => {
+  if (!st.doc) return;
+  clearTimeout(imgTimer);
+  imgTimer = setTimeout(paintTiles, 60);
+}, { passive: true });
+
 viewer.addEventListener(
   "wheel",
   (ev) => {
@@ -1023,6 +1398,7 @@ viewer.addEventListener(
 
 const TOOL_KEYS = { v: "select", h: "highlight", u: "underline", k: "strikeout", n: "note", t: "text", p: "pen", l: "line", a: "arrow", b: "box", c: "cloud", g: "polygon", y: "polyline", q: "callout", m: "measure", s: "stamp" };
 window.addEventListener("keydown", (ev) => {
+  if (!pwModal.hidden || !protModal.hidden) return;
   const typing = ev.target instanceof HTMLTextAreaElement || ev.target instanceof HTMLInputElement;
   const mod = ev.ctrlKey || ev.metaKey;
   if (mod && ev.key.toLowerCase() === "s") {
@@ -1031,7 +1407,7 @@ window.addEventListener("keydown", (ev) => {
     else doSave();
     return;
   }
-  if (!sendModal.hidden || !pagesModal.hidden || !dropModal.hidden) return;
+  if (!sendModal.hidden || !pagesModal.hidden || !dropModal.hidden || !pwModal.hidden || !protModal.hidden) return;
   if (mod && !typing && ev.key.toLowerCase() === "z") {
     ev.preventDefault();
     undoRedo(ev.shiftKey ? "redo" : "undo");

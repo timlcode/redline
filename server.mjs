@@ -71,6 +71,9 @@ export function createServer(opts = {}) {
     name: null,
     dirty: false,
     rev: 0,
+    // true when the open file required a user (open) password. The password
+    // itself is never stored.
+    userPasswordSet: false,
   };
   let persistTimer = null;
 
@@ -101,8 +104,14 @@ export function createServer(opts = {}) {
       dirty: state.dirty,
       rev: state.rev,
       page: p,
+      protection: protectionState(),
       ...undoInfo(),
     };
+  }
+
+  function protectionState() {
+    if (!state.doc) return { encrypted: false, method: null, print: true, copy: true, edit: true, userPassword: false };
+    return { ...P.protectionInfo(state.doc), userPassword: state.userPasswordSet };
   }
 
   function undoInfo() {
@@ -149,22 +158,31 @@ export function createServer(opts = {}) {
     persistSoon();
   }
 
-  function loadDoc(bytes, sourcePath, name) {
+  function loadDoc(bytes, sourcePath, name, password) {
     if (!P.isPdfBytes(bytes)) {
       // an image opens as a one-page document (unsaved: Save As decides where it goes)
       if (!P.isImageBytes(new Uint8Array(bytes))) throw P.httpError(400, "Not a PDF file");
       bytes = P.saveBytes(P.openSource(new Uint8Array(bytes)));
       sourcePath = null;
       name = String(name || "image").replace(/\.[^.]+$/, "") + ".pdf";
+      password = undefined;
     }
-    fs.writeFileSync(workFile, bytes);
-    const doc = P.openBytes(new Uint8Array(fs.readFileSync(workFile)));
-    if (doc.countPages() < 1) throw P.httpError(400, "PDF has no pages");
+    // Copy off any WASM view, then open once. A rejected password must not
+    // replace the working copy or the document already open.
+    const copy = Buffer.from(bytes);
+    const opened = P.openPdf(new Uint8Array(copy), password);
+    const doc = opened.doc;
+    if (doc.countPages() < 1) {
+      try { doc.destroy(); } catch { /* already gone */ }
+      throw P.httpError(400, "PDF has no pages");
+    }
+    fs.writeFileSync(workFile, copy);
     doc.enableJournal();
     state.doc = doc;
     state.sourcePath = sourcePath;
     state.name = name;
     state.dirty = false;
+    state.userPasswordSet = opened.passwordRequired;
     state.rev++;
     try { ocrOnOpen(); } catch (e) { console.error("ocr on open:", e.message); }
     return summary(0);
@@ -194,7 +212,7 @@ export function createServer(opts = {}) {
     }
   }
 
-  async function openPath(p) {
+  async function openPath(p, password) {
     if (typeof p !== "string" || !p) throw P.httpError(400, "path required");
     const abs = path.resolve(p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p);
     let st;
@@ -210,13 +228,26 @@ export function createServer(opts = {}) {
     await fh.close();
     const bytes = await fsp.readFile(abs);
     if (head.toString("latin1") !== "%PDF-" && !P.isImageBytes(new Uint8Array(bytes))) throw P.httpError(400, "Not a PDF or image file");
-    return loadDoc(bytes, abs, path.basename(abs));
+    return loadDoc(bytes, abs, path.basename(abs), password);
   }
 
   // Before the first overwrite of an existing file, keep its untouched bytes as
   // <name>.redline-bak.pdf; an existing backup is never replaced.
-  async function saveTo(target) {
-    const bytes = P.saveBytes(state.doc);
+  async function saveTo(target, protectionInput) {
+    const spec = P.normalizeProtection(protectionInput);
+    let bytes;
+    try {
+      bytes = P.saveBytes(state.doc, spec);
+    } finally {
+      // Drop password strings held by this request. The encrypted file does
+      // not contain them, and they are not written anywhere else.
+      if (spec.mode === "password") {
+        spec.userPassword = "";
+        spec.ownerPassword = "";
+      }
+    }
+    if (spec.mode === "none") state.userPasswordSet = false;
+    else if (spec.mode === "password") state.userPasswordSet = !!protectionInput.userPassword;
     const bak = backupPathFor(target);
     let backup = null;
     if (fs.existsSync(target) && !fs.existsSync(bak)) {
@@ -228,7 +259,13 @@ export function createServer(opts = {}) {
     state.sourcePath = target;
     state.name = path.basename(target);
     state.dirty = false;
-    return { ok: true, path: target, bytes: bytes.length, dirty: false, backup };
+    return { ok: true, path: target, bytes: bytes.length, dirty: false, backup, protection: protectionState() };
+  }
+
+  function passwordFromHeader(req) {
+    const h = req.headers["x-password"];
+    if (h == null || h === "") return undefined;
+    try { return decodeURIComponent(String(h)); } catch { return undefined; }
   }
 
   function runPicker(mode, pickOpts = {}) {
@@ -502,13 +539,18 @@ export function createServer(opts = {}) {
 
     if (p === "/api/open" && m === "POST") {
       const body = await readJson(req);
-      return json(res, await openPath(body.path));
+      const password = typeof body.password === "string" ? body.password : undefined;
+      try {
+        return json(res, await openPath(body.path, password));
+      } finally {
+        body.password = undefined;
+      }
     }
     if (p === "/api/open-upload" && m === "POST") {
       const bytes = await readBody(req, MAX_UPLOAD);
       const raw = req.headers["x-filename"];
       const name = raw ? path.basename(decodeURIComponent(String(raw))) : "upload.pdf";
-      return json(res, loadDoc(bytes, null, name));
+      return json(res, loadDoc(bytes, null, name, passwordFromHeader(req)));
     }
     if (p === "/api/doc" && m === "GET") {
       needDoc();
@@ -516,12 +558,25 @@ export function createServer(opts = {}) {
     }
 
     let mm;
+    if ((mm = p.match(/^\/api\/page\/(\d+)\/tile$/)) && m === "GET") {
+      const png = P.renderTile(
+        needDoc(),
+        Number(mm[1]),
+        P.clampZoom(url.searchParams.get("zoom") ?? 1),
+        url.searchParams.get("x"),
+        url.searchParams.get("y"),
+        url.searchParams.get("w"),
+        url.searchParams.get("h"),
+        state.rev,
+      );
+      return send(res, 200, png, "image/png");
+    }
     if ((mm = p.match(/^\/api\/page\/(\d+)$/)) && m === "GET") {
       const png = P.renderPage(needDoc(), Number(mm[1]), P.clampZoom(url.searchParams.get("zoom") ?? 1));
       return send(res, 200, png, "image/png");
     }
     if ((mm = p.match(/^\/api\/thumbs\/(\d+)$/)) && m === "GET") {
-      return send(res, 200, P.renderThumb(needDoc(), Number(mm[1])), "image/png");
+      return send(res, 200, P.renderThumb(needDoc(), Number(mm[1]), 140, state.rev), "image/png");
     }
     if (p === "/api/annots" && m === "GET") {
       return json(res, P.listAnnots(needDoc(), Number(url.searchParams.get("page") ?? 0)));
@@ -739,8 +794,16 @@ export function createServer(opts = {}) {
     }
     if (p === "/api/save" && m === "POST") {
       needDoc();
+      const b = await readJson(req);
       if (!state.sourcePath) return json(res, { error: "No source path; use Save As" }, 400);
-      return json(res, await saveTo(state.sourcePath));
+      try {
+        return json(res, await saveTo(state.sourcePath, b.protection));
+      } finally {
+        if (b.protection) {
+          b.protection.userPassword = undefined;
+          b.protection.ownerPassword = undefined;
+        }
+      }
     }
     if (p === "/api/save-as" && m === "POST") {
       needDoc();
@@ -749,7 +812,37 @@ export function createServer(opts = {}) {
       let target = path.resolve(b.path.startsWith("~/") ? path.join(os.homedir(), b.path.slice(2)) : b.path);
       if (!/\.pdf$/i.test(target)) target += ".pdf";
       if (!fs.existsSync(path.dirname(target))) throw P.httpError(400, "Folder does not exist");
-      return json(res, await saveTo(target));
+      try {
+        return json(res, await saveTo(target, b.protection));
+      } finally {
+        if (b.protection) {
+          b.protection.userPassword = undefined;
+          b.protection.ownerPassword = undefined;
+        }
+      }
+    }
+    if (p === "/api/download" && m === "POST") {
+      needDoc();
+      const b = await readJson(req);
+      const hadUserPassword = !!(b.protection && b.protection.userPassword);
+      const spec = P.normalizeProtection(b.protection);
+      let bytes;
+      try {
+        bytes = P.saveBytes(state.doc, spec);
+      } finally {
+        if (spec.mode === "password") {
+          spec.userPassword = "";
+          spec.ownerPassword = "";
+        }
+        if (b.protection) {
+          b.protection.userPassword = undefined;
+          b.protection.ownerPassword = undefined;
+        }
+      }
+      if (spec.mode === "none") state.userPasswordSet = false;
+      else if (spec.mode === "password") state.userPasswordSet = hadUserPassword;
+      const name = (state.name || "redline.pdf").replace(/[^\w.\- ]/g, "_");
+      return send(res, 200, bytes, "application/pdf", { "Content-Disposition": `attachment; filename="${name}"` });
     }
     if (p === "/api/download" && m === "GET") {
       const bytes = P.saveBytes(needDoc());
@@ -826,7 +919,11 @@ export function createServer(opts = {}) {
     handle(req, res).catch((e) => {
       const status = e.status || 500;
       if (status === 500) console.error(new Date().toISOString(), req.method, req.url, e.message);
-      if (!res.headersSent) json(res, { error: String(e.message || e).slice(0, 300) }, status);
+      if (!res.headersSent) {
+        const body = { error: String(e.message || e).slice(0, 300) };
+        if (e.code) body.code = e.code;
+        json(res, body, status);
+      }
       else res.end();
     });
   });
