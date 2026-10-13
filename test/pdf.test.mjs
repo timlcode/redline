@@ -391,19 +391,28 @@ test("HTTP API end to end: open, every tool, save with backup, save-as, reopen",
 test("send API: routes, live-markup snapshot, validation", async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redline-send-"));
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const dataDir = path.join(tmp, "data");
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dataDir, "settings.json"),
+    JSON.stringify({ email: "user@example.com", handoff: { dropFolder: "/tmp/redline-drop", endpoint: "http://127.0.0.1:9/in" } }),
+  );
   const calls = [];
   const snap = (file) => ({ file, name: path.basename(file), bytes: fs.readFileSync(file) });
   const sender = {
-    sendConfig: () => ({ email: { ready: true, from: "me@x.com" }, telegram: { ready: true }, localsend: { ready: true } }),
+    sendConfig: () => ({
+      email: { ready: true, from: "user@example.com" },
+      handoff: { ready: true, dropFolder: "/tmp/redline-drop", endpoint: "http://127.0.0.1:9/in" },
+      localsend: { ready: true },
+    }),
     lanInterfaces: () => [],
     openMailSetup: () => ({ ok: true }),
     discoverLocalSend: async () => [{ ip: "10.0.0.9", port: 53317, protocol: "https", alias: "Phone" }],
     sendEmail: async (file, b) => (calls.push({ via: "email", ...snap(file), b }), { ok: true, via: "email" }),
-    sendTelegram: async (file, b) => (calls.push({ via: "telegram", ...snap(file), b }), { ok: true, via: "telegram" }),
-    sendToMac: async (file, mac) => (calls.push({ via: "mac", ...snap(file), mac }), { ok: true, via: "mac" }),
+    sendHandoff: async (file, handoff) => (calls.push({ via: "handoff", ...snap(file), handoff }), { ok: true, via: "handoff" }),
     sendLocalSend: async (file, dev) => (calls.push({ via: "localsend", ...snap(file), dev }), { ok: true, via: "localsend" }),
   };
-  const server = createServer({ autoOcrPages: 0, dataDir: path.join(tmp, "data"), pickCommand: false, sender });
+  const server = createServer({ autoOcrPages: 0, dataDir, pickCommand: false, sender });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   t.after(() => server.close());
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -411,7 +420,7 @@ test("send API: routes, live-markup snapshot, validation", async (t) => {
     const res = await fetch(base + p, { method, headers: { "X-Redline": "1", "Content-Type": "application/json" }, body: body && JSON.stringify(body) });
     return { status: res.status, body: await res.json() };
   };
-  assert.equal((await api("POST", "/api/send", { via: "telegram" })).status, 404, "no doc open");
+  assert.equal((await api("POST", "/api/send", { via: "handoff" })).status, 404, "no doc open");
   const src = path.join(tmp, "Sheet 1.pdf");
   fs.writeFileSync(src, P.saveBytes(P.newBlankDocument(1)));
   await api("POST", "/api/open", { path: src });
@@ -419,20 +428,22 @@ test("send API: routes, live-markup snapshot, validation", async (t) => {
 
   assert.equal((await api("GET", "/api/send/config")).body.name, "Sheet 1.pdf");
   assert.equal((await api("GET", "/api/send/localsend/devices")).body.devices[0].alias, "Phone");
-  for (const via of ["email", "mac", "telegram", "localsend"]) {
-    const r = await api("POST", "/api/send", { via, subject: "Sheet 1", mac: "parker", caption: "hi", device: { ip: "10.0.0.9" } });
+  for (const via of ["email", "handoff", "localsend"]) {
+    const r = await api("POST", "/api/send", { via, subject: "Sheet 1", device: { ip: "10.0.0.9" } });
     assert.equal(r.status, 200, via);
   }
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 3);
   for (const c of calls) {
     assert.equal(c.name, "Sheet 1.pdf");
     const doc = P.openBytes(new Uint8Array(c.bytes));
     assert.equal(P.listAnnots(doc, 0).length, 1, `${c.via} gets unsaved markup`);
   }
   assert.equal(calls[0].b.subject, "Sheet 1");
-  assert.equal(calls[1].mac, "parker");
-  assert.equal(calls[3].dev.ip, "10.0.0.9");
-  assert.equal(new Set(calls.map((c) => c.file)).size, 4, "each send gets its own snapshot (open drafts keep theirs)");
+  assert.equal(calls[0].b.email, "user@example.com");
+  assert.equal(calls[1].handoff.dropFolder, "/tmp/redline-drop");
+  assert.equal(calls[1].handoff.endpoint, "http://127.0.0.1:9/in");
+  assert.equal(calls[2].dev.ip, "10.0.0.9");
+  assert.equal(new Set(calls.map((c) => c.file)).size, 3, "each send gets its own snapshot (open drafts keep theirs)");
   assert.ok(calls.every((c) => fs.existsSync(c.file)), "earlier snapshots are not deleted");
   assert.equal((await api("POST", "/api/send", { via: "fax" })).status, 400);
 });
@@ -484,33 +495,49 @@ test("LocalSend client: mTLS prepare-upload + upload against a fake receiver", a
   await assert.rejects(S.sendLocalSend(file, { ip: "not-an-ip" }), /Pick a LocalSend device/);
 });
 
-test("Thunderbird compose: finds the work identity and builds the -compose args", async (t) => {
+test("Thunderbird compose: finds the configured sender and builds the -compose args", async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "redline-tb-"));
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
   const prof = path.join(tmp, "home/.thunderbird/abc.default-release");
   fs.mkdirSync(prof, { recursive: true });
-  fs.writeFileSync(path.join(prof, "prefs.js"), 'user_pref("mail.identity.id1.useremail", "user@example.com");\nuser_pref("mail.identity.id3.useremail", "user@example.com");\n');
+  fs.writeFileSync(path.join(prof, "prefs.js"), 'user_pref("mail.identity.id1.useremail", "user@example.com");\nuser_pref("mail.identity.id3.useremail", "sender@example.com");\n');
+  const data = path.join(tmp, "home/.local/share/redline");
+  fs.mkdirSync(data, { recursive: true });
+  fs.writeFileSync(path.join(data, "settings.json"), JSON.stringify({ email: "sender@example.com" }));
   const bin = path.join(tmp, "bin");
   fs.mkdirSync(bin);
   const log = path.join(tmp, "args.txt");
   fs.writeFileSync(path.join(bin, "thunderbird"), `#!/bin/sh\nprintf '%s\\n' "$@" > ${log}\n`, { mode: 0o755 });
   const oldHome = process.env.HOME;
   const oldPath = process.env.PATH;
+  const oldData = process.env.REDLINE_DATA_DIR;
   process.env.HOME = path.join(tmp, "home");
   process.env.PATH = `${bin}:${oldPath}`;
+  process.env.REDLINE_DATA_DIR = data;
   t.after(() => {
     process.env.HOME = oldHome;
     process.env.PATH = oldPath;
+    if (oldData === undefined) delete process.env.REDLINE_DATA_DIR;
+    else process.env.REDLINE_DATA_DIR = oldData;
   });
   const S = await import(`../lib/send.mjs?tb=${Date.now()}`);
-  assert.deepEqual(S.workIdentity()?.id, "id3");
+  assert.deepEqual(S.senderIdentity()?.id, "id3");
   const r = await S.sendEmail("/tmp/out/Sheet A's.pdf", { subject: "Sheet A's" });
   assert.equal(r.accountReady, true);
+  assert.equal(r.from, "sender@example.com");
   for (let i = 0; i < 50 && !fs.existsSync(log); i++) await new Promise((res) => setTimeout(res, 50));
   const args = fs.readFileSync(log, "utf8").trim().split("\n");
   assert.equal(args[0], "-compose");
   assert.match(args[1], /attachment='file:\/\/\/tmp\/out\/Sheet%20A/);
   assert.match(args[1], /preselectid='id3'/);
-  assert.match(args[1], /from='user@example.com'/);
+  assert.match(args[1], /from='sender@example.com'/);
   assert.doesNotMatch(args[1].replace(/='[^']*'/g, ""), /'/, "quotes inside values are neutralised");
+  fs.rmSync(log);
+  const plain = await S.sendEmail("/tmp/out/Sheet A's.pdf", { subject: "Sheet A's", email: "" });
+  assert.equal(plain.accountReady, true);
+  assert.equal(plain.from, null);
+  for (let i = 0; i < 50 && !fs.existsSync(log); i++) await new Promise((res) => setTimeout(res, 50));
+  const plainArgs = fs.readFileSync(log, "utf8");
+  assert.doesNotMatch(plainArgs, /from=/);
+  assert.doesNotMatch(plainArgs, /preselectid=/);
 });

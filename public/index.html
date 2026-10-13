@@ -14,7 +14,7 @@
     <button id="btn-open" title="Open a PDF (Ctrl+O)">Open</button>
     <button id="btn-save" title="Save (Ctrl+S)" disabled>Save</button>
     <button id="btn-saveas" title="Save As (Ctrl+Shift+S)" disabled>Save As</button>
-    <button id="btn-send" title="Send by email, Telegram or LocalSend (Ctrl+E)" disabled>Send</button>
+    <button id="btn-send" title="Send by email, handoff, or LocalSend (Ctrl+E)" disabled>Send</button>
     <button id="btn-ocr" title="Read every scanned page so the whole document can be searched (Ctrl+Shift+O)" disabled>Read all</button>
     <button id="btn-find" title="Find text (Ctrl+F)" disabled>Find</button>
     <button id="btn-comments" title="Comment list (Ctrl+Shift+M)" disabled>Comments</button>
@@ -255,12 +255,11 @@
     </div>
     <div class="tabs">
       <button class="tab active" data-via="email">Email</button>
-      <button class="tab" data-via="mac">Parker / Bishop</button>
-      <button class="tab" data-via="telegram">Telegram</button>
+      <button class="tab" data-via="handoff">Handoff</button>
       <button class="tab" data-via="localsend">LocalSend</button>
     </div>
     <div class="pane" data-pane="email">
-      <p class="lead">Opens a new message from <b id="em-from">your work account</b> with this PDF attached. Add recipients and write the message there.</p>
+      <p class="lead">Opens a new message from <b id="em-from">your mail account</b> with this PDF attached. Add recipients and write the message there.</p>
       <div id="email-setup" class="notice" hidden>
         <span id="email-reason"></span>
         <button id="email-setup-btn">Open Thunderbird</button>
@@ -268,14 +267,10 @@
       </div>
       <label>Subject <input id="em-subject" type="text"></label>
     </div>
-    <div class="pane" data-pane="mac" hidden>
-      <p class="lead">Copies the PDF straight into <b>Downloads</b> on the Mac over Tailscale. Nothing to accept on the other end.</p>
-      <div id="mac-list" class="ls-list"></div>
-    </div>
-    <div class="pane" data-pane="telegram" hidden>
-      <div class="from">To <span id="tg-to">You (Hermes bot chat)</span></div>
-      <label>Caption <textarea id="tg-caption" rows="3" placeholder="optional"></textarea></label>
-      <p class="hint">Lands in your chat with the Hermes bot; forward it from there. For Parker or Bishop, use the Parker / Bishop tab (Telegram bots can't message each other).</p>
+    <div class="pane" data-pane="handoff" hidden>
+      <p class="lead">Copies this PDF into a drop folder and/or POSTs it to an HTTP endpoint from your settings file.</p>
+      <div id="handoff-detail" class="from"></div>
+      <p class="hint" id="handoff-hint"></p>
     </div>
     <div class="pane" data-pane="localsend" hidden>
       <div class="ls-head">
@@ -283,7 +278,7 @@
         <button id="ls-refresh">Refresh</button>
       </div>
       <div id="ls-list" class="ls-list"></div>
-      <p class="hint">Accept the file on the receiving device. For the Macs, Redline starts LocalSend for you if it's closed.</p>
+      <p class="hint">Accept the file on the receiving device.</p>
     </div>
     <div class="modal-foot">
       <span id="send-msg" class="send-msg"></span>

@@ -77,9 +77,10 @@ function createWindow(openPath) {
   });
 }
 
-// Auto-update from GitHub Releases via electron-updater. For a PRIVATE repo the
-// installed app must hold a read token (REDLINE_UPDATE_TOKEN / GH_TOKEN) to read
-// the release feed; without it, checks fail silently and the app stays put.
+// Auto-update from GitHub Releases via electron-updater. The repository is
+// public, so a token is optional. Set REDLINE_UPDATE_TOKEN, GH_TOKEN, or
+// GITHUB_TOKEN to authenticate and raise the API rate limit; without one,
+// checks use the public release feed.
 function setupUpdater() {
   if (!app.isPackaged) {
     console.log("[updater] dev mode — update checks disabled");
