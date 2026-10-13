@@ -139,6 +139,10 @@ Fixtures (not committed): a ${SPEC_PAGES}-page letter spec book (${mb(meta.specB
 
 ${table(specB, specA, drawB, drawA)}
 
+## What these numbers show
+
+Text classification dominated open: on these files it was nearly the whole open time, and the content-stream sniff removes that scan. First paint at fit-width barely changes, because a letter page and a fit-width sheet are only a little taller than the ${VIEW_H} px viewport, so the visible tiles cover most of the pixels a full-page raster would draw. The 2× zoom re-render is where tiles win: the page has about four times as many pixels and the screen does not, and the display list from the first paint is reused. Scroll throughput improves more modestly for the same reason. Search and save still walk the whole file on one thread. Save of these freshly built files is already a few milliseconds; the before/after gap there is noise, not a different save path.
+
 ## Bottlenecks
 
 - **Full-page raster at the current zoom.** Fit-width of a 24×36 sheet is still about ${Math.round(DRAW_W * 0.64)}×${Math.round(DRAW_H * 0.64)} pixels, and zooming in rasterizes the whole sheet again. The screen only shows ${VIEW_W}×${VIEW_H}. Tile rendering draws that rectangle (and reuses the display list when the zoom changes).

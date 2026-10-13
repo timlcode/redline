@@ -1006,8 +1006,7 @@ async function openPath(p) {
       continue;
     }
     password = undefined;
-    onOpened(s);
-    status(`Opened ${s.name}`);
+    if (!onOpened(s)) status(`Opened ${s.name}`);
     return;
   }
 }
@@ -1030,7 +1029,9 @@ function onOpened(s) {
     if (!s.protection.copy) bits.push("copying");
     if (!s.protection.edit) bits.push("editing");
     status(bits.length ? `Opened with restrictions (${bits.join(", ")} off)` : "Opened a protected PDF");
+    return true;
   }
+  return false;
 }
 
 async function uploadFile(file) {
@@ -1062,8 +1063,7 @@ async function uploadFile(file) {
       continue;
     }
     password = undefined;
-    onOpened(s);
-    status(s.sourcePath ? `Opened ${s.name}` : `Opened ${s.name} (upload – Save will download a copy)`);
+    if (!onOpened(s)) status(s.sourcePath ? `Opened ${s.name}` : `Opened ${s.name} (upload – Save will download a copy)`);
     return;
   }
 }
