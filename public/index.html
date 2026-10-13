@@ -14,6 +14,7 @@
     <button id="btn-open" title="Open a PDF (Ctrl+O)">Open</button>
     <button id="btn-save" title="Save (Ctrl+S)" disabled>Save</button>
     <button id="btn-saveas" title="Save As (Ctrl+Shift+S)" disabled>Save As</button>
+    <button id="btn-protect" title="Protect with a password, or change print, copy, and edit permissions" disabled>Protect</button>
     <button id="btn-send" title="Send by email, handoff, or LocalSend (Ctrl+E)" disabled>Send</button>
     <button id="btn-ocr" title="Read every scanned page so the whole document can be searched (Ctrl+Shift+O)" disabled>Read all</button>
     <button id="btn-find" title="Find text (Ctrl+F)" disabled>Find</button>
@@ -23,7 +24,7 @@
     <button id="btn-undo" title="Undo (Ctrl+Z)" disabled>&#x21B6; Undo</button>
     <button id="btn-redo" title="Redo (Ctrl+Shift+Z)" disabled>&#x21B7;</button>
   </div>
-  <div class="docname"><span id="dirty" class="dirty" title="Unsaved changes" hidden></span><span id="docname">No file</span></div>
+  <div class="docname"><span id="dirty" class="dirty" title="Unsaved changes" hidden></span><span id="docname">No file</span><span id="protchip" class="chip" hidden></span></div>
   <div class="group needs-doc">
     <button id="btn-prev" title="Previous page (PgUp)">&lsaquo;</button>
     <span id="pageind" class="ind">– / –</span>
@@ -181,7 +182,7 @@
       </div>
     </div>
     <div id="pagewrap" hidden>
-      <img id="pageimg" alt="" draggable="false">
+      <div id="pagetiles"></div>
       <canvas id="overlay"></canvas>
       <div id="seltools" class="seltools" hidden>
         <button data-act="highlight" title="Highlight selection">Highlight</button>
@@ -284,6 +285,45 @@
       <span id="send-msg" class="send-msg"></span>
       <button id="send-cancel">Cancel</button>
       <button id="send-go" class="primary">Send</button>
+    </div>
+  </div>
+</div>
+<div id="pwmodal" class="modal-back" hidden>
+  <div class="modal" role="dialog" aria-labelledby="pw-title">
+    <div class="modal-head"><span id="pw-title">Password required</span><button type="button" id="pw-close" class="x" title="Close (Esc)">&times;</button></div>
+    <div class="pane">
+      <p class="lead" id="pw-lead">This PDF needs a password to open.</p>
+      <label>Password <input id="pw-input" type="password" autocomplete="off" spellcheck="false" maxlength="127"></label>
+      <p id="pw-err" class="send-msg err" hidden>Incorrect password.</p>
+    </div>
+    <div class="modal-foot">
+      <button type="button" id="pw-cancel">Cancel</button>
+      <button type="button" id="pw-ok" class="primary">Open</button>
+    </div>
+  </div>
+</div>
+<div id="protmodal" class="modal-back" hidden>
+  <div class="modal wide" role="dialog" aria-labelledby="prot-title">
+    <div class="modal-head"><span id="prot-title">Protect with password</span><button type="button" id="prot-close" class="x" title="Close (Esc)">&times;</button></div>
+    <div class="pane">
+      <p class="lead" id="prot-lead">Choose what happens to passwords and permissions when this file is saved.</p>
+      <label class="check" id="prot-keep-l"><input type="radio" name="prot-mode" value="keep"> Keep existing protection</label>
+      <label class="check"><input type="radio" name="prot-mode" value="none"> Remove protection</label>
+      <label class="check"><input type="radio" name="prot-mode" value="password"> Set an open password and permissions (AES-256)</label>
+      <div id="prot-fields" hidden>
+        <label>Open password <input id="prot-open" type="password" autocomplete="off" spellcheck="false" maxlength="127"></label>
+        <label>Confirm open password <input id="prot-open2" type="password" autocomplete="off" spellcheck="false" maxlength="127"></label>
+        <label>Permissions password <input id="prot-owner" type="password" autocomplete="off" spellcheck="false" maxlength="127"></label>
+        <p class="hint">Leave the open password blank to allow opening without a password. A different permissions password is required to turn off printing, copying, or editing. Passwords are sent only with the save and are not written to settings or logs.</p>
+        <label class="check"><input id="prot-print" type="checkbox" checked> Allow printing</label>
+        <label class="check"><input id="prot-copy" type="checkbox" checked> Allow copying text and images</label>
+        <label class="check"><input id="prot-edit" type="checkbox" checked> Allow editing</label>
+      </div>
+      <p id="prot-err" class="send-msg err" hidden></p>
+    </div>
+    <div class="modal-foot">
+      <button type="button" id="prot-cancel">Cancel</button>
+      <button type="button" id="prot-ok" class="primary">Apply</button>
     </div>
   </div>
 </div>

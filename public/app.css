@@ -68,8 +68,10 @@ body:not(.has-doc) #thumbs { display: none; }
 .thumb.active { color: #fff; }
 
 #viewer { flex: 1; overflow: auto; position: relative; background: var(--bg); }
-#pagewrap { position: relative; margin: 20px auto; width: max-content; box-shadow: 0 2px 18px rgba(0, 0, 0, 0.55); }
-#pageimg { display: block; user-select: none; background: #fff; }
+#pagewrap { position: relative; margin: 20px auto; width: max-content; background: #fff; box-shadow: 0 2px 18px rgba(0, 0, 0, 0.55); }
+#pagetiles { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+#pagetiles img { position: absolute; display: block; }
+.modal.wide { width: 520px; }
 #overlay { position: absolute; inset: 0; touch-action: none; }
 #viewer[data-tool="select"] #overlay { cursor: default; }
 #viewer[data-tool="select"] #overlay.over-annot { cursor: move; }
