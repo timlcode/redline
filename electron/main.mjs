@@ -41,8 +41,29 @@ function pick(mode, { suggest } = {}) {
   return Promise.resolve({ canceled: true });
 }
 
+function printPdf(filePath) {
+  return new Promise((resolve, reject) => {
+    const hidden = new BrowserWindow({
+      show: false,
+      webPreferences: { contextIsolation: true, nodeIntegration: false },
+    });
+    const finish = (err) => {
+      if (!hidden.isDestroyed()) hidden.close();
+      if (err) reject(err);
+      else resolve({ ok: true });
+    };
+    hidden.webContents.once("did-fail-load", () => finish(new Error("Could not open the print copy")));
+    hidden.webContents.once("did-finish-load", () => {
+      hidden.webContents.print({ silent: false, printBackground: true }, (ok, reason) => {
+        finish(ok ? null : new Error(reason || "Print was cancelled"));
+      });
+    });
+    hidden.loadFile(filePath);
+  });
+}
+
 async function startServer() {
-  const server = createServer({ dataDir: app.getPath("userData"), pick });
+  const server = createServer({ dataDir: app.getPath("userData"), pick, print: printPdf });
   await new Promise((resolve, reject) => {
     server.on("error", reject);
     server.listen(0, "127.0.0.1", resolve);

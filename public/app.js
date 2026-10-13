@@ -34,6 +34,11 @@ const st = {
   ocrUnread: 0,
   tmap: null, // text map of the current page: { page, lines, chars:[{c,q,line}] }
   sel: null, // text selection: { a, b } global char indices (inclusive)
+  fields: [],
+  signPlace: null,
+  signFieldId: null,
+  flattenOnSave: false,
+  focusFieldId: null,
 };
 
 const viewer = $("#viewer");
@@ -111,6 +116,11 @@ function setDoc(summary, page) {
   $("#btn-ocr").disabled = false;
   $("#btn-find").disabled = false;
   $("#btn-comments").disabled = false;
+  $("#btn-fields").disabled = false;
+  $("#btn-sign").disabled = false;
+  $("#btn-flatten").disabled = false;
+  $("#btn-print").disabled = false;
+  $("#btn-compress").disabled = false;
   updateChrome();
 }
 
@@ -204,6 +214,7 @@ function layoutPage() {
   canvas.style.height = `${ch}px`;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   drawOverlay();
+  layoutFields();
 }
 
 function tilesCovering(pageW, pageH, view) {
@@ -339,6 +350,7 @@ function showPage() {
   st.annots = [];
   loadPageImage(true);
   loadAnnots();
+  loadFields();
   updateChrome();
   ocrAround(st.page);
   $(`.thumb[data-page="${st.page}"]`)?.scrollIntoView({ block: "nearest" });
@@ -466,6 +478,16 @@ function drawOverlay() {
       x1 += st.drag.dx;
       y0 += st.drag.dy;
       y1 += st.drag.dy;
+    } else if (st.drag?.kind === "resize" && st.drag.id === sel.id) {
+      const d = st.drag;
+      const x = d.x ?? d.sx;
+      const y = d.y ?? d.sy;
+      if (d.name.includes("w")) x0 = x;
+      if (d.name.includes("e")) x1 = x;
+      if (d.name.includes("n")) y0 = y;
+      if (d.name.includes("s")) y1 = y;
+      if (x1 < x0) [x0, x1] = [x1, x0];
+      if (y1 < y0) [y0, y1] = [y1, y0];
     }
     ctx.save();
     ctx.strokeStyle = "#e10600";
@@ -531,6 +553,16 @@ function localPoint(ev) {
   return [ev.clientX - r.left, ev.clientY - r.top];
 }
 
+function signCorner(a, x, y) {
+  if (!a || (a.kind !== "signature" && a.kind !== "initials")) return null;
+  const [x0, y0, x1, y1] = a.rect.map((v) => v * st.zoom);
+  const corners = [["nw", x0, y0], ["ne", x1, y0], ["sw", x0, y1], ["se", x1, y1]];
+  for (const [name, hx, hy] of corners) {
+    if (Math.abs(x - hx) <= 10 && Math.abs(y - hy) <= 10) return { name, x0, y0, x1, y1, id: a.id };
+  }
+  return null;
+}
+
 function hitTest(x, y) {
   const z = st.zoom;
   for (let i = st.annots.length - 1; i >= 0; i--) {
@@ -548,9 +580,25 @@ canvas.addEventListener("pointerdown", (ev) => {
     return;
   }
   const [x, y] = localPoint(ev);
+  if (st.signPlace) {
+    st.selected = null;
+    st.drag = { kind: "draw", tool: "place-sign", x0: x, y0: y, x1: x, y1: y };
+    canvas.setPointerCapture(ev.pointerId);
+    drawOverlay();
+    return;
+  }
   const tool = st.tool;
   if (tool === "select") {
     const hit = hitTest(x, y);
+    const corner = signCorner(hit, x, y) || signCorner(st.annots.find((a) => a.id === st.selected), x, y);
+    if (corner) {
+      st.selected = corner.id;
+      clearSel();
+      st.drag = { kind: "resize", ...corner, sx: x, sy: y };
+      canvas.setPointerCapture(ev.pointerId);
+      drawOverlay();
+      return;
+    }
     st.selected = hit ? hit.id : null;
     $$(".cm").forEach((c) => c.classList.toggle("active", hit && Number(c.dataset.id) === hit.id));
     clearSel();
@@ -643,6 +691,9 @@ canvas.addEventListener("pointermove", (ev) => {
   if (d.kind === "move") {
     d.dx = x - d.sx;
     d.dy = y - d.sy;
+  } else if (d.kind === "resize") {
+    d.x = x;
+    d.y = y;
   } else if (d.kind === "seltext") {
     const i = charAt(x, y, true);
     if (i >= 0 && i !== d.b) { d.b = i; d.moved = true; st.sel = { a: d.a, b: d.b }; }
@@ -681,6 +732,19 @@ function endDrag(ev) {
     if (Math.hypot(d.dx, d.dy) >= 2) moveAnnot(d.id, d.dx, d.dy);
     return;
   }
+  if (d.kind === "resize") {
+    const x = d.x ?? d.sx;
+    const y = d.y ?? d.sy;
+    let { x0, y0, x1, y1 } = d;
+    if (d.name.includes("n")) y0 = y;
+    if (d.name.includes("s")) y1 = y;
+    if (d.name.includes("w")) x0 = x;
+    if (d.name.includes("e")) x1 = x;
+    const rect = [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)];
+    drawOverlay();
+    if (rect[2] - rect[0] < 8 || rect[3] - rect[1] < 8) return;
+    return resizeAnnot(d.id, rect);
+  }
   if (d.kind === "seltext") {
     if (!d.moved) { st.sel = null; drawOverlay(); return; }
     st.sel = { a: Math.min(d.a, d.b), b: Math.max(d.a, d.b) };
@@ -701,6 +765,13 @@ function endDrag(ev) {
   const rect = [Math.min(d.x0, d.x1), Math.min(d.y0, d.y1), Math.max(d.x0, d.x1), Math.max(d.y0, d.y1)];
   const rw = rect[2] - rect[0];
   const rh = rect[3] - rect[1];
+  if (d.tool === "place-sign") {
+    const kind = st.signPlace?.kind || "signature";
+    const dw = (kind === "initials" ? 80 : 180) * st.zoom;
+    const dh = (kind === "initials" ? 40 : 64) * st.zoom;
+    const r = rw < 12 || rh < 12 ? [d.x0, d.y0, d.x0 + dw, d.y0 + dh] : rect;
+    return placeSavedSignature(r);
+  }
   if (d.tool === "image-stamp") {
     const r = rw < 15 || rh < 15 ? [d.x0, d.y0, d.x0 + 160 * st.zoom, d.y0 + 100 * st.zoom] : rect;
     return commitImageStamp(r);
@@ -861,6 +932,13 @@ async function moveAnnot(id, dx, dy) {
   });
 }
 
+async function resizeAnnot(id, rect) {
+  await guarded(async () => {
+    await api("PATCH", `/api/annots/${id}`, { rect, zoom: st.zoom });
+    await afterAnnotChange();
+  });
+}
+
 async function deleteSelected() {
   const id = st.selected;
   if (!id) return;
@@ -1015,6 +1093,9 @@ function onOpened(s) {
   st.rev++;
   cm.items = null;
   pendingProtection = null;
+  st.fields = [];
+  st.signPlace = null;
+  st.flattenOnSave = false;
   st.zoom = 1;
   st.kinds = [];
   closeFind();
@@ -1136,22 +1217,25 @@ function readProtectionForm() {
   return { mode: "password", userPassword, ownerPassword, print, copy, edit };
 }
 
+function outputBody(protection) {
+  const body = { protection: protection || { mode: "keep" }, stampSignatures: true };
+  if (st.flattenOnSave) body.flatten = { forms: $("#flat-forms").checked, annotations: $("#flat-annots").checked };
+  return body;
+}
+
+function afterOutput(r) {
+  if (!r || (!r.stamped && !r.flattened)) return;
+  st.signPlace = null;
+  st.rev = r.rev || st.rev + 1;
+  showPage();
+}
+
 async function download(protection) {
   const mode = protection?.mode || "keep";
-  if (mode === "keep") {
-    const a = document.createElement("a");
-    a.href = `/api/download?v=${Date.now()}`;
-    a.download = st.doc?.name || "redline.pdf";
-    document.body.append(a);
-    a.click();
-    a.remove();
-    status("Downloaded a copy");
-    return true;
-  }
   const res = await fetch("/api/download", {
     method: "POST",
     headers: { "X-Redline": "1", "Content-Type": "application/json" },
-    body: JSON.stringify({ protection }),
+    body: JSON.stringify(outputBody(protection)),
   });
   const ct = res.headers.get("content-type") || "";
   if (!res.ok) {
@@ -1172,14 +1256,14 @@ async function download(protection) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1500);
-  if (st.doc) {
+  if (st.doc && mode !== "keep") {
     st.doc.protection = {
       encrypted: mode === "password",
       method: mode === "password" ? "AES-256" : null,
-      print: protection.print !== false,
-      copy: protection.copy !== false,
-      edit: protection.edit !== false,
-      userPassword: !!protection.userPassword,
+      print: protection?.print !== false,
+      copy: protection?.copy !== false,
+      edit: protection?.edit !== false,
+      userPassword: !!protection?.userPassword,
     };
   }
   status("Downloaded a copy");
@@ -1212,11 +1296,13 @@ async function doSave() {
   await runSave(async (protection) => {
     if (!st.doc.sourcePath) return download(protection);
     status("Saving…");
-    const r = await guarded(() => api("POST", "/api/save", { protection }));
+    const r = await guarded(() => api("POST", "/api/save", outputBody(protection)));
     if (!r) return false;
     if (r.protection) st.doc.protection = r.protection;
     setDirty(false);
-    status(r.backup ? `Saved. Original kept as ${r.backup.split("/").pop()}` : "Saved");
+    afterOutput(r);
+    const extra = r.stamped ? " Signature written into the page." : "";
+    status((r.backup ? `Saved. Original kept as ${r.backup.split("/").pop()}` : "Saved") + extra);
     return true;
   });
 }
@@ -1231,12 +1317,13 @@ async function doSaveAs() {
     }
     if (!r.path) return false;
     status("Saving…");
-    const s = await guarded(() => api("POST", "/api/save-as", { path: r.path, protection }));
+    const s = await guarded(() => api("POST", "/api/save-as", { path: r.path, ...outputBody(protection) }));
     if (!s) return false;
     st.doc.sourcePath = s.path;
     st.doc.name = s.path.split("/").pop();
     if (s.protection) st.doc.protection = s.protection;
     setDirty(false);
+    afterOutput(s);
     status(`Saved as ${st.doc.name}`);
     return true;
   });
@@ -1399,7 +1486,7 @@ viewer.addEventListener(
 const TOOL_KEYS = { v: "select", h: "highlight", u: "underline", k: "strikeout", n: "note", t: "text", p: "pen", l: "line", a: "arrow", b: "box", c: "cloud", g: "polygon", y: "polyline", q: "callout", m: "measure", s: "stamp" };
 window.addEventListener("keydown", (ev) => {
   if (!pwModal.hidden || !protModal.hidden) return;
-  const typing = ev.target instanceof HTMLTextAreaElement || ev.target instanceof HTMLInputElement;
+  const typing = ev.target instanceof HTMLTextAreaElement || ev.target instanceof HTMLInputElement || ev.target instanceof HTMLSelectElement;
   const mod = ev.ctrlKey || ev.metaKey;
   if (mod && ev.key.toLowerCase() === "s") {
     ev.preventDefault();
@@ -1407,7 +1494,12 @@ window.addEventListener("keydown", (ev) => {
     else doSave();
     return;
   }
-  if (!sendModal.hidden || !pagesModal.hidden || !dropModal.hidden || !pwModal.hidden || !protModal.hidden) return;
+  if (!sendModal.hidden || !pagesModal.hidden || !dropModal.hidden || !pwModal.hidden || !protModal.hidden || extraModalOpen()) return;
+  if (mod && ev.key.toLowerCase() === "p") {
+    ev.preventDefault();
+    if (st.doc) openPrint();
+    return;
+  }
   if (mod && !typing && ev.key.toLowerCase() === "z") {
     ev.preventDefault();
     undoRedo(ev.shiftKey ? "redo" : "undo");
@@ -1542,8 +1634,8 @@ function sendMsg(text, kind = "") {
 
 function setVia(via) {
   send.via = via;
-  $$(".tab").forEach((t) => t.classList.toggle("active", t.dataset.via === via));
-  $$(".pane").forEach((p) => (p.hidden = p.dataset.pane !== via));
+  $$("#sendmodal .tab").forEach((t) => t.classList.toggle("active", t.dataset.via === via));
+  $$("#sendmodal .pane").forEach((p) => (p.hidden = p.dataset.pane !== via));
   $("#send-go").textContent = GO_LABEL[via];
   sendMsg("");
   if (via === "localsend" && !send.devices.length && !send.scanning) scanDevices();
@@ -1718,7 +1810,7 @@ $("#send-close").addEventListener("click", closeSend);
 $("#send-cancel").addEventListener("click", closeSend);
 $("#send-go").addEventListener("click", doSend);
 $("#ls-refresh").addEventListener("click", scanDevices);
-$$(".tab").forEach((t) => t.addEventListener("click", () => setVia(t.dataset.via)));
+$$("#sendmodal .tab").forEach((t) => t.addEventListener("click", () => setVia(t.dataset.via)));
 $("#em-subject").addEventListener("input", (ev) => (ev.target.dataset.auto = "0"));
 $("#email-recheck").addEventListener("click", () => guarded(loadSendConfig));
 $("#email-setup-btn").addEventListener("click", async () => {
@@ -2792,3 +2884,589 @@ function trimInch(v) {
   return whole ? `${whole} ${n / g}/${d / g}` : `${n / g}/${d / g}`;
 }
 function gcd1(a, b) { return b ? gcd1(b, a % b) : a; }
+
+// ---------- forms, signatures, flatten, print, compress ----------
+
+function extraModalOpen() {
+  for (const id of ["signmodal", "flatmodal", "printmodal", "compressmodal"]) {
+    const el = document.getElementById(id);
+    if (el && !el.hidden) return true;
+  }
+  return false;
+}
+
+function closeExtraModals() {
+  for (const id of ["signmodal", "flatmodal", "printmodal", "compressmodal"]) {
+    const el = document.getElementById(id);
+    if (el) el.hidden = true;
+  }
+}
+
+function bytesLabel(n) {
+  if (!Number.isFinite(n)) return "—";
+  if (n < 1024) return `${n} bytes`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+async function loadFields() {
+  if (!st.doc) return;
+  try {
+    const data = await api("GET", "/api/fields");
+    st.fields = data.fields || [];
+  } catch {
+    st.fields = [];
+  }
+  renderFields();
+}
+
+function layoutFields() {
+  const layer = $("#formlayer");
+  if (!layer) return;
+  for (const el of layer.querySelectorAll(".field")) {
+    const field = st.fields.find((f) => f.id === Number(el.dataset.id));
+    if (!field) continue;
+    placeField(el, field);
+  }
+}
+
+function placeField(el, field) {
+  const z = st.zoom;
+  const [x0, y0, x1, y1] = field.rect;
+  el.style.left = `${x0 * z}px`;
+  el.style.top = `${y0 * z}px`;
+  el.style.width = `${Math.max(8, (x1 - x0) * z)}px`;
+  el.style.height = `${Math.max(8, (y1 - y0) * z)}px`;
+  if (el.tagName === "INPUT" && el.type === "text" || el.tagName === "TEXTAREA") {
+    el.style.fontSize = `${Math.max(9, Math.min(18, (y1 - y0) * z * 0.62))}px`;
+  }
+}
+
+function renderFields() {
+  const layer = $("#formlayer");
+  if (!layer) return;
+  layer.replaceChildren();
+  const pageFields = st.fields.filter((f) => f.page === st.page);
+  for (const field of pageFields) layer.append(fieldControl(field));
+  if (st.focusFieldId) {
+    const el = layer.querySelector(`[data-id="${st.focusFieldId}"]`);
+    st.focusFieldId = null;
+    if (el && !el.disabled) el.focus();
+  }
+}
+
+function fieldControl(field) {
+  let el;
+  if (field.type === "checkbox") {
+    el = document.createElement("input");
+    el.type = "checkbox";
+    el.className = "field checkbox";
+    el.checked = !!field.selected;
+  } else if (field.type === "radio") {
+    el = document.createElement("input");
+    el.type = "radio";
+    el.className = "field radio";
+    el.name = `radio-${field.name}`;
+    el.checked = !!field.selected;
+    el.value = field.option || "Yes";
+  } else if (field.type === "dropdown" || field.type === "list") {
+    el = document.createElement("select");
+    el.className = "field";
+    const blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = "";
+    el.append(blank);
+    for (const opt of field.options || []) {
+      const o = document.createElement("option");
+      o.value = opt;
+      o.textContent = opt;
+      if (opt === field.value) o.selected = true;
+      el.append(o);
+    }
+  } else if (field.type === "signature") {
+    el = document.createElement("button");
+    el.type = "button";
+    el.className = "field signature";
+    el.textContent = "Sign";
+  } else if (field.multiline) {
+    el = document.createElement("textarea");
+    el.className = "field";
+    el.value = field.value || "";
+  } else {
+    el = document.createElement("input");
+    el.type = field.password ? "password" : "text";
+    el.className = "field";
+    el.value = field.value || "";
+    if (field.maxLen > 0) el.maxLength = field.maxLen;
+  }
+  el.dataset.id = String(field.id);
+  el.dataset.type = field.type;
+  el.title = field.label || field.name || "Field";
+  el.disabled = !field.editable;
+  if (field.required) el.title += " (required)";
+  placeField(el, field);
+  if (field.type === "signature") {
+    el.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openSign({ fieldId: field.id });
+    });
+  } else if (el.tagName === "SELECT") {
+    el.addEventListener("change", () => { if (el.value) commitField(el); });
+  } else if (el.type === "checkbox" || el.type === "radio") {
+    el.addEventListener("change", () => commitField(el));
+  } else {
+    el.addEventListener("change", () => commitField(el));
+    el.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && el.tagName !== "TEXTAREA") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        commitField(el, 1);
+      } else if (ev.key === "Tab") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        commitField(el, ev.shiftKey ? -1 : 1);
+      }
+    });
+  }
+  return el;
+}
+
+function fieldValueOf(el) {
+  if (el.type === "checkbox") return el.checked;
+  if (el.type === "radio") return el.checked ? el.value : "Off";
+  return el.value;
+}
+
+function nextEditableId(currentId, direction) {
+  const order = st.fields.filter((f) => f.editable);
+  if (!order.length) return null;
+  const dir = direction < 0 ? -1 : 1;
+  const i = order.findIndex((f) => f.id === Number(currentId));
+  const start = i < 0 ? (dir > 0 ? -1 : 0) : i;
+  return order[(start + dir + order.length) % order.length].id;
+}
+
+async function commitField(el, direction) {
+  const id = Number(el.dataset.id);
+  const value = fieldValueOf(el);
+  const next = direction ? nextEditableId(id, direction) : null;
+  const data = await guarded(() => api("POST", `/api/fields/${id}`, { value }));
+  if (!data) {
+    await loadFields();
+    return;
+  }
+  st.fields = data.fields || st.fields;
+  st.rev++;
+  setDirty(true);
+  loadPageImage(true);
+  refreshThumb(st.page);
+  refreshDocMeta();
+  if (next) {
+    const dest = st.fields.find((f) => f.id === next);
+    if (dest && dest.page !== st.page) {
+      st.focusFieldId = next;
+      gotoPage(dest.page);
+      return;
+    }
+  }
+  renderFields();
+  if (next) {
+    const focus = $("#formlayer").querySelector(`[data-id="${next}"]`);
+    if (focus) focus.focus();
+  }
+}
+
+function focusFirstField() {
+  const onPage = st.fields.filter((f) => f.page === st.page && f.editable);
+  const field = onPage[0] || st.fields.find((f) => f.editable);
+  if (!field) {
+    status("This document has no fillable fields");
+    return;
+  }
+  setTool("select");
+  if (field.page !== st.page) {
+    st.focusFieldId = field.id;
+    gotoPage(field.page);
+    return;
+  }
+  const el = $("#formlayer").querySelector(`[data-id="${field.id}"]`);
+  if (el) el.focus();
+}
+
+$("#btn-fields").addEventListener("click", focusFirstField);
+
+const signModal = $("#signmodal");
+const flatModal = $("#flatmodal");
+const printModal = $("#printmodal");
+const compressModal = $("#compressmodal");
+let signMode = "draw";
+let signInk = false;
+let signImage = null;
+let signSavedId = null;
+const signCanvas = $("#sign-draw");
+const signCtx = signCanvas.getContext("2d");
+
+function bytesToBase64(bytes) {
+  let s = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) s += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  return btoa(s);
+}
+
+function resetSignPad() {
+  signCtx.clearRect(0, 0, signCanvas.width, signCanvas.height);
+  signInk = false;
+  signImage = null;
+  signSavedId = null;
+  $("#sign-text").value = "";
+  $("#sign-file").textContent = "";
+  $("#sign-msg").textContent = "";
+  $("#sign-keep").checked = true;
+}
+
+function openSign({ fieldId = null } = {}) {
+  if (!st.doc) return;
+  st.signFieldId = fieldId;
+  $("#sign-title").textContent = fieldId ? "Sign this field" : "Signature";
+  $("#sign-field").hidden = !fieldId;
+  $("#sign-place").hidden = !!fieldId;
+  resetSignPad();
+  showSignPane("draw");
+  loadSavedSignatures();
+  signModal.hidden = false;
+}
+
+function showSignPane(mode) {
+  signMode = mode;
+  $$("#signmodal .tab").forEach((b) => b.classList.toggle("active", b.dataset.sign === mode));
+  $$("#signmodal [data-signpane]").forEach((p) => { p.hidden = p.dataset.signpane !== mode; });
+}
+
+async function loadSavedSignatures() {
+  const box = $("#sign-saved");
+  box.replaceChildren();
+  let items = [];
+  try {
+    items = (await api("GET", "/api/signatures")).items || [];
+  } catch {
+    items = [];
+  }
+  $("#sign-saved-empty").hidden = items.length > 0;
+  for (const item of items) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.title = item.kind === "initials" ? "Initials" : "Signature";
+    const img = document.createElement("img");
+    img.src = `/api/signatures/${item.id}.png`;
+    img.alt = b.title;
+    b.append(img);
+    b.addEventListener("click", () => {
+      signSavedId = item.id;
+      $$("#sign-saved button").forEach((el) => el.classList.toggle("active", el === b));
+      const kind = document.querySelector(`input[name="sign-kind"][value="${item.kind}"]`);
+      if (kind) kind.checked = true;
+    });
+    box.append(b);
+  }
+}
+
+function signKind() {
+  return document.querySelector('input[name="sign-kind"]:checked')?.value || "signature";
+}
+
+function padPng() {
+  if (!signInk) return null;
+  return new Promise((resolve) => signCanvas.toBlob((blob) => resolve(blob), "image/png"));
+}
+
+async function signatureBytes() {
+  if (signMode === "saved") {
+    if (!signSavedId) throw new Error("Choose a saved signature");
+    const res = await fetch(`/api/signatures/${signSavedId}.png`);
+    if (!res.ok) throw new Error("Saved signature not found");
+    return { id: signSavedId, bytes: new Uint8Array(await res.arrayBuffer()) };
+  }
+  if (signMode === "type") {
+    const data = await api("POST", "/api/signatures/typed", { text: $("#sign-text").value, kind: signKind(), save: $("#sign-keep").checked });
+    const bytes = Uint8Array.from(atob(data.png), (c) => c.charCodeAt(0));
+    return { id: data.item?.id || null, bytes };
+  }
+  let bytes;
+  if (signMode === "image") {
+    if (!signImage) throw new Error("Choose an image first");
+    bytes = signImage;
+  } else {
+    const blob = await padPng();
+    if (!blob) throw new Error("Draw a signature first");
+    bytes = new Uint8Array(await blob.arrayBuffer());
+  }
+  let id = null;
+  if ($("#sign-keep").checked || signMode === "saved") {
+    const stored = await api("POST", "/api/signatures", undefined, {
+      body: bytes,
+      headers: { "Content-Type": "image/png", "X-Sign-Kind": signKind(), "X-Sign-Mode": signMode === "image" ? "image" : "draw" },
+    });
+    id = stored.id;
+  }
+  return { id, bytes };
+}
+
+async function useSignature(where) {
+  $("#sign-msg").textContent = "";
+  try {
+    const got = await signatureBytes();
+    if (where === "field" && st.signFieldId) {
+      const body = got.id ? { id: got.id } : { png: bytesToBase64(got.bytes) };
+      const data = await api("POST", `/api/fields/${st.signFieldId}/signature`, body);
+      st.fields = data.fields || st.fields;
+      st.rev++;
+      setDirty(true);
+      signModal.hidden = true;
+      loadPageImage(true);
+      refreshThumb(st.page);
+      renderFields();
+      status("Signature added to the field");
+      return;
+    }
+    st.signPlace = { id: got.id, kind: signKind(), png: got.id ? null : bytesToBase64(got.bytes) };
+    signModal.hidden = true;
+    setTool("select");
+    status(signKind() === "initials" ? "Drag on the page to place your initials" : "Drag on the page to place your signature");
+  } catch (e) {
+    $("#sign-msg").textContent = e.message;
+    $("#sign-msg").classList.add("err");
+  }
+}
+
+async function placeSavedSignature(rect) {
+  const place = st.signPlace;
+  st.signPlace = null;
+  if (!place) return;
+  await guarded(async () => {
+    const body = { page: st.page, zoom: st.zoom, rect, kind: place.kind };
+    if (place.id) body.id = place.id;
+    else body.png = place.png;
+    const a = await api("POST", "/api/signatures/place", body);
+    st.selected = a.id;
+    await afterAnnotChange();
+    status("Placed. Drag to move, drag a corner to resize. Save writes it into the page.");
+  });
+}
+
+function bindDrawPad() {
+  let drawing = false;
+  const pt = (ev) => {
+    const r = signCanvas.getBoundingClientRect();
+    return [(ev.clientX - r.left) * (signCanvas.width / r.width), (ev.clientY - r.top) * (signCanvas.height / r.height)];
+  };
+  signCanvas.addEventListener("pointerdown", (ev) => {
+    drawing = true;
+    signCanvas.setPointerCapture(ev.pointerId);
+    const [x, y] = pt(ev);
+    signCtx.strokeStyle = "#111";
+    signCtx.lineWidth = 3;
+    signCtx.lineCap = "round";
+    signCtx.beginPath();
+    signCtx.moveTo(x, y);
+  });
+  signCanvas.addEventListener("pointermove", (ev) => {
+    if (!drawing) return;
+    const [x, y] = pt(ev);
+    signCtx.lineTo(x, y);
+    signCtx.stroke();
+    signInk = true;
+  });
+  const stop = () => { drawing = false; };
+  signCanvas.addEventListener("pointerup", stop);
+  signCanvas.addEventListener("pointercancel", stop);
+  $("#sign-clear").addEventListener("click", () => {
+    signCtx.clearRect(0, 0, signCanvas.width, signCanvas.height);
+    signInk = false;
+  });
+}
+
+$("#btn-sign").addEventListener("click", () => openSign());
+$$("#signmodal .tab").forEach((b) => b.addEventListener("click", () => showSignPane(b.dataset.sign)));
+$("#sign-close").addEventListener("click", () => { signModal.hidden = true; });
+$("#sign-cancel").addEventListener("click", () => { signModal.hidden = true; });
+$("#sign-place").addEventListener("click", () => useSignature("page"));
+$("#sign-field").addEventListener("click", () => useSignature("field"));
+$("#sign-cert").addEventListener("click", async () => {
+  const id = st.signFieldId || st.fields.find((f) => f.type === "signature" && f.page === st.page)?.id;
+  if (!id) {
+    $("#sign-msg").textContent = "Choose a signature field first. Certificate signing is not available.";
+    return;
+  }
+  try {
+    await api("POST", `/api/fields/${id}/sign-certificate`, {});
+    status("Certificate signature recorded");
+    signModal.hidden = true;
+  } catch (e) {
+    $("#sign-msg").textContent = e.message || "Certificate signing is not available";
+  }
+});
+$("#sign-pick").addEventListener("click", () => $("#signfile").click());
+$("#signfile").addEventListener("change", async (ev) => {
+  const file = ev.target.files && ev.target.files[0];
+  ev.target.value = "";
+  if (!file) return;
+  $("#sign-file").textContent = file.name;
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = url; });
+    const c = document.createElement("canvas");
+    c.width = img.naturalWidth || 1;
+    c.height = img.naturalHeight || 1;
+    c.getContext("2d").drawImage(img, 0, 0);
+    const blob = await new Promise((resolve) => c.toBlob(resolve, "image/png"));
+    signImage = new Uint8Array(await blob.arrayBuffer());
+  } catch {
+    $("#sign-msg").textContent = "Could not read that image";
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+});
+signModal.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); signModal.hidden = true; }
+});
+bindDrawPad();
+resetSignPad();
+
+function openFlatten() {
+  if (!st.doc) return;
+  $("#flat-onsave").checked = !!st.flattenOnSave;
+  $("#flat-msg").textContent = "";
+  flatModal.hidden = false;
+}
+$("#btn-flatten").addEventListener("click", openFlatten);
+function rememberFlattenChoice() {
+  st.flattenOnSave = $("#flat-onsave").checked;
+}
+$("#flat-close").addEventListener("click", () => { rememberFlattenChoice(); flatModal.hidden = true; });
+$("#flat-cancel").addEventListener("click", () => { rememberFlattenChoice(); flatModal.hidden = true; });
+$("#flat-go").addEventListener("click", async () => {
+  const forms = $("#flat-forms").checked;
+  const annotations = $("#flat-annots").checked;
+  if (!forms && !annotations) {
+    $("#flat-msg").textContent = "Choose fields, markup, or both.";
+    return;
+  }
+  st.flattenOnSave = $("#flat-onsave").checked;
+  const data = await guarded(() => api("POST", "/api/flatten", { forms, annotations, page: st.page }));
+  if (!data) return;
+  flatModal.hidden = true;
+  st.selected = null;
+  st.rev++;
+  setDoc(data, st.page);
+  buildThumbs();
+  showPage();
+  setDirty(true);
+  status("Flattened. Those fields and marks are now part of the page.");
+});
+flatModal.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); flatModal.hidden = true; }
+});
+
+function openPrint() {
+  if (!st.doc) return;
+  $("#print-pages").value = String(st.page + 1);
+  $("#print-msg").textContent = "";
+  printModal.hidden = false;
+  $("#print-pages").focus();
+}
+$("#btn-print").addEventListener("click", openPrint);
+$("#print-close").addEventListener("click", () => { printModal.hidden = true; });
+$("#print-cancel").addEventListener("click", () => { printModal.hidden = true; });
+$("#print-this").addEventListener("click", () => { $("#print-pages").value = String(st.page + 1); });
+$("#print-all").addEventListener("click", () => { $("#print-pages").value = `1-${st.doc?.pageCount || 1}`; });
+$("#print-go").addEventListener("click", async () => {
+  const pages = $("#print-pages").value.trim();
+  if (!pages) { $("#print-msg").textContent = "Enter a page range."; return; }
+  $("#print-msg").textContent = "Preparing…";
+  const res = await fetch("/api/print", {
+    method: "POST",
+    headers: { "X-Redline": "1", "Content-Type": "application/json" },
+    body: JSON.stringify({ pages, deliver: "dialog" }),
+  });
+  const ct = res.headers.get("content-type") || "";
+  if (!res.ok) {
+    let msg = "Could not print";
+    if (ct.includes("json")) msg = (await res.json()).error || msg;
+    $("#print-msg").textContent = msg;
+    return;
+  }
+  if (ct.includes("pdf")) {
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const frame = document.createElement("iframe");
+    frame.hidden = true;
+    frame.src = url;
+    document.body.append(frame);
+    frame.onload = () => {
+      try { frame.contentWindow.focus(); frame.contentWindow.print(); } catch { status("Print preview is ready", true); }
+    };
+    printModal.hidden = true;
+    status("Printing a flattened copy. This document is unchanged.");
+    return;
+  }
+  printModal.hidden = true;
+  status("Sent to the printer. This document is unchanged.");
+});
+printModal.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); printModal.hidden = true; }
+  else if (ev.key === "Enter") { ev.preventDefault(); $("#print-go").click(); }
+});
+
+function showSizes(result) {
+  const same = result.before === result.after;
+  const changed = result.imagesChanged || 0;
+  $("#compress-sizes").textContent = same
+    ? `${bytesLabel(result.before)} — no pictures needed shrinking (${changed} changed)`
+    : `${bytesLabel(result.before)} → ${bytesLabel(result.after)} (${changed} picture${changed === 1 ? "" : "s"})`;
+}
+function openCompress() {
+  if (!st.doc) return;
+  $("#compress-msg").textContent = "";
+  $("#compress-sizes").textContent = "Sizes appear here after you check or compress.";
+  compressModal.hidden = false;
+}
+function compressBody(preview) {
+  return {
+    dpi: Number($("#compress-dpi").value),
+    quality: Number($("#compress-quality").value),
+    grayscale: $("#compress-gray").checked,
+    preview,
+  };
+}
+$("#compress-quality").addEventListener("input", () => { $("#compress-qval").textContent = $("#compress-quality").value; });
+$("#btn-compress").addEventListener("click", openCompress);
+$("#compress-close").addEventListener("click", () => { compressModal.hidden = true; });
+$("#compress-cancel").addEventListener("click", () => { compressModal.hidden = true; });
+$("#compress-preview").addEventListener("click", async () => {
+  $("#compress-msg").textContent = "Checking…";
+  const data = await guarded(() => api("POST", "/api/compress", compressBody(true)));
+  $("#compress-msg").textContent = "";
+  if (data) showSizes(data);
+});
+$("#compress-go").addEventListener("click", async () => {
+  $("#compress-msg").textContent = "Compressing…";
+  const data = await guarded(() => api("POST", "/api/compress", compressBody(false)));
+  $("#compress-msg").textContent = "";
+  if (!data) return;
+  showSizes(data);
+  if (data.imagesChanged) {
+    st.rev = data.rev || st.rev + 1;
+    setDirty(true);
+    loadPageImage(true);
+    refreshThumb(st.page);
+    buildThumbs();
+    status("Pictures reduced. Save the file to keep the smaller size.");
+  } else {
+    status("No pictures needed shrinking");
+  }
+});
+compressModal.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); compressModal.hidden = true; }
+});

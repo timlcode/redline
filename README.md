@@ -18,6 +18,11 @@ No cloud. No plugins. No subscription. Your documents never leave your computer.
 - **Stamps** — fixed, custom-text, dynamic (`{date}` / `{time}` / `{author}`), and image stamps.
 - **Comments** — per-annotation notes with author, threaded replies, and CSV / PDF export.
 - **Page operations** — insert, combine, extract, split, and delete pages.
+- **Fill in forms** — type in text fields, check boxes, pick a radio button or a dropdown, and tab from field to field. Built for pay applications (a cover sheet plus a continuation sheet) and lien waivers.
+- **Sign** — draw, type, or import a picture of a signature or initials. Save it on this computer and reuse it. Drag it onto the page, then move or resize it. Save writes it into the page. Signing with a certificate is not included.
+- **Flatten** — bake filled fields and markup into the page so they are no longer editable, on demand or the next time you save.
+- **Print** — print the pages you choose (Ctrl+P). The printed copy is flattened; the open file is not.
+- **Reduce file size** — shrink pictures to a chosen sharpness (300 down to 72 dpi) and see the size before and after.
 - **Text tools** — select, copy, and find (Ctrl+F) across OCR'd pages.
 - **Send** — email (opens a compose window), a configurable handoff (drop folder and/or HTTP POST), or LocalSend.
 - **Undo / redo** — every edit is journaled.
@@ -48,6 +53,8 @@ The sender address and handoff targets live in `settings.json` inside the app da
 
 - Desktop app: Electron's user-data directory. On Linux that is usually `~/.config/redline`.
 - `npm start`: `$REDLINE_DATA_DIR`, or `~/.local/share/redline` when that variable is unset.
+
+Reusable signatures and initials are pictures in a `signatures` folder inside that same app data folder. They are never stored in the project and are not written into a PDF until you place one and save.
 
 ```json
 {
