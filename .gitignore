@@ -27,3 +27,6 @@ Thumbs.db
 
 # local scratch
 .scratch/
+
+# filled-in app settings (copy settings.example.json into the data folder)
+settings.json

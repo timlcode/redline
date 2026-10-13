@@ -110,6 +110,7 @@ body.dragging #viewer { outline: 2px dashed var(--accent); outline-offset: -8px;
 .pane input:focus, .pane textarea:focus { outline: none; border-color: #4a5262; }
 .pane .from { color: var(--dim); }
 .pane .from span { color: var(--fg); }
+#handoff-detail { display: flex; flex-direction: column; gap: 4px; word-break: break-all; }
 .pane .hint { margin: 0; color: var(--dim); font-size: 12px; }
 .notice { background: #2a1416; border: 1px solid #5a2a2a; border-radius: 3px; padding: 8px; color: #ffb3ad; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .ls-head { display: flex; align-items: center; justify-content: space-between; color: var(--dim); }

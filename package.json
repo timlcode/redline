@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node server.mjs",
     "electron": "electron .",
-    "test": "node --test test/pdf.test.mjs test/ocr.test.mjs test/edit.test.mjs test/pages.test.mjs test/comments.test.mjs test/shapes.test.mjs test/measure.test.mjs",
+    "test": "node --test test/pdf.test.mjs test/ocr.test.mjs test/edit.test.mjs test/pages.test.mjs test/comments.test.mjs test/shapes.test.mjs test/measure.test.mjs test/send.test.mjs",
     "dist": "electron-builder",
     "dist:linux": "electron-builder --linux",
     "dist:mac": "electron-builder --mac",
@@ -25,7 +25,7 @@
     "pngjs": "^7.0.0"
   },
   "build": {
-    "appId": "com.waycd.redline",
+    "appId": "io.github.timlcode.redline",
     "productName": "Redline",
     "asar": false,
     "afterPack": "scripts/after-pack.mjs",

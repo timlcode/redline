@@ -759,7 +759,7 @@ export function createServer(opts = {}) {
       });
     }
     if (p === "/api/send/config" && m === "GET") {
-      return json(res, { ...sender.sendConfig(), name: state.name, interfaces: sender.lanInterfaces() });
+      return json(res, { ...sender.sendConfig(settings), name: state.name, interfaces: sender.lanInterfaces() });
     }
     if (p === "/api/send/email-setup" && m === "POST") return json(res, sender.openMailSetup());
     if (p === "/api/send/localsend/devices" && m === "GET") {
@@ -768,11 +768,10 @@ export function createServer(opts = {}) {
     if (p === "/api/send" && m === "POST") {
       const b = await readJson(req);
       const file = exportForSend();
-      if (b.via === "email") return json(res, await sender.sendEmail(file, b));
-      if (b.via === "telegram") return json(res, await sender.sendTelegram(file, b));
-      if (b.via === "mac") return json(res, await sender.sendToMac(file, b.mac));
+      if (b.via === "email") return json(res, await sender.sendEmail(file, { subject: b.subject, email: settings.email || "" }));
+      if (b.via === "handoff") return json(res, await sender.sendHandoff(file, settings.handoff || {}));
       if (b.via === "localsend") return json(res, await sender.sendLocalSend(file, b.device));
-      throw P.httpError(400, "via must be email, mac, telegram or localsend");
+      throw P.httpError(400, "via must be email, handoff or localsend");
     }
     if (p === "/api/pick" && m === "POST") {
       const b = await readJson(req);

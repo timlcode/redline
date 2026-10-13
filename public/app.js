@@ -1151,11 +1151,11 @@ window.addEventListener("beforeunload", (ev) => {
 
 window.addEventListener("resize", () => drawOverlay());
 
-// ---------- send (email / Macs / Telegram / LocalSend) ----------
+// ---------- send (email / handoff / LocalSend) ----------
 
-const send = { via: "email", cfg: null, devices: [], device: null, mac: null, busy: false, scanning: false };
+const send = { via: "email", cfg: null, devices: [], device: null, busy: false, scanning: false };
 const sendModal = $("#sendmodal");
-const GO_LABEL = { email: "Open email", mac: "Copy to Mac", telegram: "Send", localsend: "Send" };
+const GO_LABEL = { email: "Open email", handoff: "Hand off", localsend: "Send" };
 
 function sendMsg(text, kind = "") {
   const el = $("#send-msg");
@@ -1172,15 +1172,13 @@ function setVia(via) {
   sendMsg("");
   if (via === "localsend" && !send.devices.length && !send.scanning) scanDevices();
   updateSendButton();
-  if (via === "telegram") setTimeout(() => $("#tg-caption").focus(), 0);
 }
 
 function updateSendButton() {
   const c = send.cfg;
   let ok = !send.busy && !!c;
   if (ok && send.via === "email") ok = c.email.ready;
-  if (ok && send.via === "mac") ok = !!send.mac;
-  if (ok && send.via === "telegram") ok = c.telegram.ready;
+  if (ok && send.via === "handoff") ok = !!c.handoff?.ready;
   if (ok && send.via === "localsend") ok = !!send.device;
   $("#send-go").disabled = !ok;
 }
@@ -1200,18 +1198,21 @@ function devButton(title, meta, active, online, onPick) {
   return b;
 }
 
-function renderMacs() {
-  const list = $("#mac-list");
-  list.textContent = "";
-  for (const m of send.cfg?.macs || []) {
-    list.append(
-      devButton(m.label, m.machine, send.mac === m.id, undefined, () => {
-        send.mac = m.id;
-        renderMacs();
-        updateSendButton();
-      }),
-    );
-  }
+function renderHandoff() {
+  const h = send.cfg?.handoff;
+  const detail = $("#handoff-detail");
+  detail.replaceChildren();
+  const line = (text) => {
+    const div = document.createElement("div");
+    div.textContent = text;
+    detail.append(div);
+  };
+  if (h?.dropFolder) line(`Drop folder: ${h.dropFolder}`);
+  if (h?.endpoint) line(`Endpoint: ${h.endpoint}`);
+  if (!h?.dropFolder && !h?.endpoint) line("No drop folder or endpoint configured.");
+  $("#handoff-hint").textContent = h?.reason
+    ? "Add them in settings.json in the app data folder (see settings.example.json)."
+    : "The PDF is sent to every target listed above.";
 }
 
 async function loadSendConfig() {
@@ -1219,9 +1220,8 @@ async function loadSendConfig() {
   const e = send.cfg.email;
   $("#email-setup").hidden = !e.reason;
   $("#email-reason").textContent = e.reason || "";
-  $("#em-from").textContent = e.from;
-  if (!send.mac && send.cfg.macs?.length) send.mac = send.cfg.macs[0].id;
-  renderMacs();
+  $("#em-from").textContent = e.from || "your mail account";
+  renderHandoff();
   updateSendButton();
 }
 
@@ -1235,19 +1235,10 @@ function renderDevices() {
     list.append(d);
     return;
   }
-  let lastGroup = null;
   for (const dev of send.devices) {
-    const group = dev.mac ? "Your Macs" : "On this network";
-    if (group !== lastGroup) {
-      const g = document.createElement("div");
-      g.className = "ls-group";
-      g.textContent = group;
-      list.append(g);
-      lastGroup = group;
-    }
-    const meta = dev.mac ? dev.deviceModel : [dev.deviceModel, dev.ip].filter(Boolean).join(" · ");
+    const meta = [dev.deviceModel, dev.ip].filter(Boolean).join(" · ");
     list.append(
-      devButton(dev.alias, meta, send.device === dev, dev.mac ? dev.online : true, () => {
+      devButton(dev.alias, meta, send.device === dev, true, () => {
         send.device = dev;
         renderDevices();
         updateSendButton();
@@ -1257,7 +1248,7 @@ function renderDevices() {
 }
 
 async function scanDevices() {
-  const prev = send.device && (send.device.mac || send.device.fingerprint);
+  const prev = send.device?.fingerprint || null;
   send.scanning = true;
   send.device = null;
   send.devices = [];
@@ -1268,9 +1259,9 @@ async function scanDevices() {
   try {
     const r = await api("GET", "/api/send/localsend/devices");
     send.devices = r.devices || [];
-    send.device = send.devices.find((d) => prev && (d.mac || d.fingerprint) === prev) || null;
-    const others = send.devices.filter((d) => !d.mac).length;
-    $("#ls-state").textContent = `${others} other device${others === 1 ? "" : "s"} on the network`;
+    send.device = send.devices.find((d) => prev && d.fingerprint === prev) || null;
+    const n = send.devices.length;
+    $("#ls-state").textContent = `${n} device${n === 1 ? "" : "s"} on the network`;
   } catch (e) {
     $("#ls-state").textContent = `Search failed: ${e.message}`;
   } finally {
@@ -1310,26 +1301,24 @@ async function doSend() {
   const via = send.via;
   const body = { via };
   if (via === "email") body.subject = $("#em-subject").value;
-  if (via === "mac") body.mac = send.mac;
-  if (via === "telegram") body.caption = $("#tg-caption").value;
   if (via === "localsend") body.device = send.device;
-  const macName = () => send.cfg.macs.find((m) => m.id === send.mac);
   send.busy = true;
   updateSendButton();
   sendMsg(
     {
       email: "Opening Thunderbird…",
-      mac: `Copying to ${macName()?.machine}…`,
-      telegram: "Sending…",
-      localsend: send.device?.mac && !send.device.online ? `Starting LocalSend on the Mac…` : `Waiting for ${send.device?.alias} to accept…`,
+      handoff: "Handing off…",
+      localsend: `Waiting for ${send.device?.alias || "the device"} to accept…`,
     }[via],
   );
   try {
     const r = await api("POST", "/api/send", body);
+    const handoffParts = [];
+    if (r.dropped) handoffParts.push(`Copied to ${r.dropped}`);
+    if (r.posted) handoffParts.push("Posted to the endpoint");
     const done = {
-      email: r.accountReady ? "Email opened in Thunderbird" : "Thunderbird opened. Add your work account, then send again",
-      mac: `In Downloads on ${r.to}`,
-      telegram: "Sent to your Telegram",
+      email: r.accountReady ? "Email opened in Thunderbird" : "Thunderbird opened. Add the sender address from settings, then send again",
+      handoff: handoffParts.join(". ") || "Sent",
       localsend: `Sent to ${r.to}`,
     }[via];
     sendMsg(done, "ok");
@@ -1358,7 +1347,7 @@ $("#em-subject").addEventListener("input", (ev) => (ev.target.dataset.auto = "0"
 $("#email-recheck").addEventListener("click", () => guarded(loadSendConfig));
 $("#email-setup-btn").addEventListener("click", async () => {
   await guarded(() => api("POST", "/api/send/email-setup", {}));
-  sendMsg("Add your work account in Thunderbird, then press Check again");
+  sendMsg("Add the sender address from settings in Thunderbird, then press Check again");
 });
 sendModal.addEventListener("mousedown", (ev) => {
   if (ev.target === sendModal) closeSend();
