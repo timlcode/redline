@@ -10,6 +10,11 @@ import * as S from "./lib/send.mjs";
 import * as O from "./lib/ocrdoc.mjs";
 import { pageTextKind } from "./lib/textlayer.mjs";
 import * as M from "./lib/measure.mjs";
+import * as Forms from "./lib/forms.mjs";
+import * as Flat from "./lib/flatten.mjs";
+import * as Comp from "./lib/compress.mjs";
+import * as Sig from "./lib/signatures.mjs";
+import { signWithCertificate } from "./lib/digitalsign.mjs";
 
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(APP_DIR, "public");
@@ -231,10 +236,73 @@ export function createServer(opts = {}) {
     return loadDoc(bytes, abs, path.basename(abs), password);
   }
 
+  function dropDoc(doc) {
+    if (!doc || doc === state.doc) return;
+    try { doc.destroy(); } catch { /* already gone */ }
+  }
+
+  function adoptWorkingDoc(doc) {
+    if (!doc || doc === state.doc) return;
+    doc.enableJournal();
+    const prev = state.doc;
+    state.doc = doc;
+    state.rev++;
+    dropDoc(prev);
+  }
+
+  /**
+   * Stamp placed signatures, and optionally bake forms and markup, on a copy.
+   * Save adopts that copy so the open file matches what was written.
+   * A download leaves the open file alone so a signature can still be moved.
+   */
+  function materializeOutput({ stampSignatures = false, flatten = null, replace = false } = {}) {
+    let doc = state.doc;
+    let stamped = 0;
+    let changed = false;
+    let flattened = false;
+    if (stampSignatures && Sig.hasPlacedFlag(doc)) {
+      const baked = Sig.documentWithStampedSignatures(doc);
+      if (baked.changed && baked.doc !== doc) {
+        doc = baked.doc;
+        stamped = baked.count;
+        changed = true;
+      }
+    }
+    if (flatten && (flatten.forms || flatten.annotations)) {
+      const base = changed ? doc : P.openBytes(new Uint8Array(P.saveBytes(doc)));
+      Flat.flattenDocument(base, flatten);
+      const fresh = P.openBytes(new Uint8Array(P.saveBytes(base)));
+      if (base !== state.doc) dropDoc(base);
+      doc = fresh;
+      changed = true;
+      flattened = true;
+    }
+    if (replace && changed) adoptWorkingDoc(doc);
+    return { doc: replace && changed ? state.doc : doc, stamped, changed, flattened };
+  }
+
+  function exportBytes(spec, output = {}) {
+    const prepared = materializeOutput({
+      stampSignatures: output.stampSignatures !== false,
+      flatten: output.flatten || null,
+      replace: false,
+    });
+    try {
+      return { bytes: P.saveBytes(prepared.doc, spec), stamped: prepared.stamped, flattened: prepared.flattened };
+    } finally {
+      if (prepared.changed) dropDoc(prepared.doc);
+    }
+  }
+
   // Before the first overwrite of an existing file, keep its untouched bytes as
   // <name>.redline-bak.pdf; an existing backup is never replaced.
-  async function saveTo(target, protectionInput) {
+  async function saveTo(target, protectionInput, output = {}) {
     const spec = P.normalizeProtection(protectionInput);
+    const prepared = materializeOutput({
+      stampSignatures: output.stampSignatures !== false,
+      flatten: output.flatten || null,
+      replace: true,
+    });
     let bytes;
     try {
       bytes = P.saveBytes(state.doc, spec);
@@ -259,7 +327,17 @@ export function createServer(opts = {}) {
     state.sourcePath = target;
     state.name = path.basename(target);
     state.dirty = false;
-    return { ok: true, path: target, bytes: bytes.length, dirty: false, backup, protection: protectionState() };
+    return {
+      ok: true,
+      path: target,
+      bytes: bytes.length,
+      dirty: false,
+      backup,
+      protection: protectionState(),
+      stamped: prepared.stamped,
+      flattened: prepared.flattened,
+      rev: state.rev,
+    };
   }
 
   function passwordFromHeader(req) {
@@ -797,7 +875,7 @@ export function createServer(opts = {}) {
       const b = await readJson(req);
       if (!state.sourcePath) return json(res, { error: "No source path; use Save As" }, 400);
       try {
-        return json(res, await saveTo(state.sourcePath, b.protection));
+        return json(res, await saveTo(state.sourcePath, b.protection, b));
       } finally {
         if (b.protection) {
           b.protection.userPassword = undefined;
@@ -813,7 +891,7 @@ export function createServer(opts = {}) {
       if (!/\.pdf$/i.test(target)) target += ".pdf";
       if (!fs.existsSync(path.dirname(target))) throw P.httpError(400, "Folder does not exist");
       try {
-        return json(res, await saveTo(target, b.protection));
+        return json(res, await saveTo(target, b.protection, b));
       } finally {
         if (b.protection) {
           b.protection.userPassword = undefined;
@@ -826,9 +904,9 @@ export function createServer(opts = {}) {
       const b = await readJson(req);
       const hadUserPassword = !!(b.protection && b.protection.userPassword);
       const spec = P.normalizeProtection(b.protection);
-      let bytes;
+      let exported;
       try {
-        bytes = P.saveBytes(state.doc, spec);
+        exported = exportBytes(spec, b);
       } finally {
         if (spec.mode === "password") {
           spec.userPassword = "";
@@ -842,7 +920,7 @@ export function createServer(opts = {}) {
       if (spec.mode === "none") state.userPasswordSet = false;
       else if (spec.mode === "password") state.userPasswordSet = hadUserPassword;
       const name = (state.name || "redline.pdf").replace(/[^\w.\- ]/g, "_");
-      return send(res, 200, bytes, "application/pdf", { "Content-Disposition": `attachment; filename="${name}"` });
+      return send(res, 200, exported.bytes, "application/pdf", { "Content-Disposition": `attachment; filename="${name}"` });
     }
     if (p === "/api/download" && m === "GET") {
       const bytes = P.saveBytes(needDoc());
@@ -911,6 +989,143 @@ export function createServer(opts = {}) {
     if (p === "/api/text" && m === "GET") {
       const page = Number(url.searchParams.get("page") ?? 0);
       return send(res, 200, O.pageText(needDoc(), page), "text/plain; charset=utf-8");
+    }
+    if (p === "/api/fields" && m === "GET") {
+      return json(res, { fields: Forms.publicFields(Forms.listFields(needDoc())) });
+    }
+    const fieldSig = p.match(/^\/api\/fields\/(\d+)\/signature$/);
+    if (fieldSig && m === "POST") {
+      const id = Number(fieldSig[1]);
+      const ct = String(req.headers["content-type"] || "");
+      let png;
+      if (ct.includes("image/png")) png = await readBody(req, 4 * 1024 * 1024);
+      else {
+        const b = await readJson(req);
+        if (b.id) png = Sig.readSignature(dataDir, b.id);
+        else if (b.png) png = Buffer.from(String(b.png), "base64");
+      }
+      const field = op("sign field", (doc) => Forms.applySignatureAppearance(doc, id, png));
+      mutated();
+      return json(res, { field, fields: Forms.publicFields(Forms.listFields(needDoc())) });
+    }
+    const fieldCert = p.match(/^\/api\/fields\/(\d+)\/sign-certificate$/);
+    if (fieldCert && m === "POST") {
+      const found = Forms.findField(needDoc(), Number(fieldCert[1]));
+      return json(res, { ok: true, result: signWithCertificate(found) });
+    }
+    const fieldOne = p.match(/^\/api\/fields\/(\d+)$/);
+    if (fieldOne && m === "POST") {
+      const b = await readJson(req);
+      const id = Number(fieldOne[1]);
+      const field = op("fill field", (doc) => Forms.setFieldValue(doc, id, b.value));
+      mutated();
+      return json(res, { field, fields: Forms.publicFields(Forms.listFields(needDoc())) });
+    }
+    if (p === "/api/signatures" && m === "GET") {
+      return json(res, { items: Sig.listSignatures(dataDir) });
+    }
+    if (p === "/api/signatures" && m === "POST") {
+      const png = await readBody(req, 4 * 1024 * 1024);
+      const kind = String(req.headers["x-sign-kind"] || "signature");
+      const mode = String(req.headers["x-sign-mode"] || "draw");
+      const item = Sig.saveSignature(dataDir, png, { kind, mode });
+      return json(res, item, 201);
+    }
+    if (p === "/api/signatures/typed" && m === "POST") {
+      const b = await readJson(req);
+      const kind = b.kind === "initials" ? "initials" : "signature";
+      const png = Sig.renderTypedSignature(b.text, { kind });
+      const item = b.save === false ? null : Sig.saveSignature(dataDir, png, { kind, mode: "type" });
+      return json(res, { item, png: png.toString("base64") }, 201);
+    }
+    if (p === "/api/signatures/place" && m === "POST") {
+      const b = await readJson(req);
+      let png;
+      let kind = b.kind;
+      if (b.id) {
+        png = Sig.readSignature(dataDir, b.id);
+        const stored = Sig.listSignatures(dataDir).find((it) => it.id === b.id);
+        kind = kind || stored?.kind || "signature";
+      } else if (b.png) {
+        png = Buffer.from(String(b.png), "base64");
+        kind = kind || "signature";
+      } else throw P.httpError(400, "Signature image required");
+      const annot = op("place signature", (doc) => Sig.placeSignature(doc, {
+        page: Number(b.page) || 0,
+        zoom: b.zoom,
+        rect: b.rect,
+        png,
+        kind,
+        author: settings.author,
+      }));
+      mutated();
+      return json(res, annot);
+    }
+    const sigPng = p.match(/^\/api\/signatures\/([a-f0-9]{16})\.png$/);
+    if (sigPng && (m === "GET" || m === "HEAD")) {
+      const buf = Sig.readSignature(dataDir, sigPng[1]);
+      return send(res, 200, m === "HEAD" ? Buffer.alloc(0) : buf, "image/png");
+    }
+    const sigDel = p.match(/^\/api\/signatures\/([a-f0-9]{16})$/);
+    if (sigDel && m === "DELETE") return json(res, Sig.deleteSignature(dataDir, sigDel[1]));
+    if (p === "/api/flatten" && m === "POST") {
+      const b = await readJson(req);
+      needDoc();
+      const flatten = { annotations: b.annotations !== false, forms: b.forms !== false };
+      if (!flatten.annotations && !flatten.forms) throw P.httpError(400, "Choose forms, markup, or both");
+      const prepared = materializeOutput({ stampSignatures: true, flatten, replace: true });
+      mutated();
+      const page = Number.isInteger(b.page) ? b.page : 0;
+      return json(res, { ...summary(page), flattened: prepared.flattened, stamped: prepared.stamped });
+    }
+    if (p === "/api/compress" && m === "POST") {
+      const b = await readJson(req);
+      needDoc();
+      const opts = Comp.normalizeCompress(b);
+      if (b.preview) {
+        const copy = P.openBytes(new Uint8Array(P.saveBytes(state.doc)));
+        try {
+          return json(res, Comp.compressDocument(copy, opts));
+        } finally {
+          dropDoc(copy);
+        }
+      }
+      const copy = P.openBytes(new Uint8Array(P.saveBytes(state.doc)));
+      const result = Comp.compressDocument(copy, opts);
+      if (result.imagesChanged) {
+        const fresh = P.openBytes(new Uint8Array(P.saveBytes(copy)));
+        dropDoc(copy);
+        adoptWorkingDoc(fresh);
+        mutated();
+      } else {
+        dropDoc(copy);
+      }
+      return json(res, { ...result, rev: state.rev, dirty: state.dirty });
+    }
+    if (p === "/api/print" && m === "POST") {
+      const b = await readJson(req);
+      const doc = needDoc();
+      const pages = P.parsePageRange(b.pages, doc.countPages());
+      if (!pages.length) throw P.httpError(400, "No pages selected");
+      const prepared = materializeOutput({ stampSignatures: true, flatten: null, replace: false });
+      const extracted = P.extractPages(prepared.doc, pages);
+      Flat.flattenDocument(extracted, { annotations: true, forms: true });
+      const bytes = P.saveBytes(extracted);
+      if (prepared.changed) dropDoc(prepared.doc);
+      dropDoc(extracted);
+      if (b.deliver === "dialog" && typeof opts.print === "function") {
+        const tmp = path.join(os.tmpdir(), `redline-print-${process.pid}-${Date.now()}.pdf`);
+        await fsp.writeFile(tmp, bytes);
+        try {
+          await opts.print(tmp);
+        } finally {
+          await fsp.rm(tmp, { force: true });
+        }
+        return json(res, { ok: true, printed: true, pages: pages.length });
+      }
+      return send(res, 200, bytes, "application/pdf", {
+        "Content-Disposition": 'inline; filename="print.pdf"',
+      });
     }
     return json(res, { error: "Not found" }, 404);
   }
