@@ -4,8 +4,8 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
-const COLORS = { yellow: "#ffd900", red: "#e10600", green: "#1a9e33", blue: "#1a59f2" };
-const DEFAULT_COLOR = { highlight: "yellow", underline: "red", strikeout: "red", note: "yellow", pen: "red", line: "red", arrow: "red", box: "red", cloud: "red", polygon: "red", polyline: "red", callout: "red", stamp: "red", measure: "red" };
+const COLORS = { yellow: "#ffd900", red: "#e10600", green: "#1a9e33", blue: "#1a59f2", black: "#111111", white: "#f4f4f4" };
+const DEFAULT_COLOR = { highlight: "yellow", underline: "red", strikeout: "red", redact: "black", note: "yellow", pen: "red", line: "red", arrow: "red", box: "red", cloud: "red", polygon: "red", polyline: "red", callout: "red", stamp: "red", measure: "red" };
 
 const st = {
   doc: null,
@@ -39,6 +39,8 @@ const st = {
   signFieldId: null,
   flattenOnSave: false,
   focusFieldId: null,
+  forceSaveAs: false,
+  suggestName: "",
 };
 
 const viewer = $("#viewer");
@@ -115,6 +117,7 @@ function setDoc(summary, page) {
   $("#btn-send").disabled = false;
   $("#btn-ocr").disabled = false;
   $("#btn-find").disabled = false;
+  $("#btn-redact").disabled = false;
   $("#btn-comments").disabled = false;
   $("#btn-fields").disabled = false;
   $("#btn-sign").disabled = false;
@@ -532,9 +535,9 @@ function drawOverlay() {
       ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.beginPath();
       ctx.moveTo(st.calloutTip[0], st.calloutTip[1]); ctx.lineTo(x, y + rh / 2); ctx.stroke();
     }
-    if (d.tool === "highlight") {
+    if (d.tool === "highlight" || d.tool === "redact") {
       ctx.fillStyle = col;
-      ctx.globalAlpha = 0.4;
+      ctx.globalAlpha = d.tool === "redact" ? 0.9 : 0.4;
       ctx.fillRect(x, y, rw, rh);
     } else {
       ctx.strokeStyle = col;
@@ -612,8 +615,8 @@ canvas.addEventListener("pointerdown", (ev) => {
     drawOverlay();
     return;
   }
-  if (tool === "highlight" || tool === "underline" || tool === "strikeout") {
-    // on text: select words as you drag; off text (highlight only): draw an area
+  if (tool === "highlight" || tool === "underline" || tool === "strikeout" || tool === "redact") {
+    // on text: select words as you drag; off text (highlight and redact): draw an area
     const i = st.tmap?.chars.length ? charAt(x, y, true, 10) : -1;
     if (i >= 0) {
       st.selected = null;
@@ -623,7 +626,7 @@ canvas.addEventListener("pointerdown", (ev) => {
       drawOverlay();
       return;
     }
-    if (tool !== "highlight") return;
+    if (tool !== "highlight" && tool !== "redact") return;
   }
   if (tool === "note") {
     openPopover({ mode: "note", point: [x, y], anchor: [x, y] });
@@ -684,7 +687,7 @@ canvas.addEventListener("pointermove", (ev) => {
   const d = st.drag;
   if (!d) {
     if (st.tool === "select") canvas.classList.toggle("over-annot", !!hitTest(x, y));
-    const textTool = st.tool === "select" || st.tool === "highlight" || st.tool === "underline" || st.tool === "strikeout";
+    const textTool = st.tool === "select" || st.tool === "highlight" || st.tool === "underline" || st.tool === "strikeout" || st.tool === "redact";
     canvas.classList.toggle("over-text", textTool && !!st.tmap?.chars.length && charAt(x, y, true, 6) >= 0 && !(st.tool === "select" && hitTest(x, y)));
     return;
   }
@@ -880,6 +883,7 @@ async function afterAnnotChange() {
   refreshThumb(st.page);
   refreshDocMeta();
   refreshComments();
+  refreshRedact();
 }
 
 async function refreshDocMeta() {
@@ -911,12 +915,17 @@ $("#btn-redo").addEventListener("click", () => undoRedo("redo"));
 async function commit(spec) {
   if (!st.doc) return;
   const body = { page: st.page, zoom: st.zoom, color: colorName(spec.tool), ...spec };
+  if (spec.tool === "redact") {
+    body.color = st.colors.redact || "black";
+    body.overlay = redactOverlay();
+    if (body.label == null && spec.contents) body.label = spec.contents;
+  }
   st.busy = true;
   drawOverlay();
   try {
     const a = await api("POST", "/api/annots", body);
     await afterAnnotChange();
-    status(`Added ${a.stamp ? a.stamp + " stamp" : a.kind}`);
+    status(spec.tool === "redact" ? "Marked for redaction" : `Added ${a.stamp ? a.stamp + " stamp" : a.kind}`);
   } catch (e) {
     status(e.message, true);
     drawOverlay();
@@ -1096,9 +1105,14 @@ function onOpened(s) {
   st.fields = [];
   st.signPlace = null;
   st.flattenOnSave = false;
+  st.forceSaveAs = false;
+  st.suggestName = "";
   st.zoom = 1;
   st.kinds = [];
   closeFind();
+  rd.hits = [];
+  rd.marks = [];
+  if (rd.open) toggleRedact(false);
   setDoc(s, 0);
   loadKinds();
   buildThumbs();
@@ -1251,7 +1265,7 @@ async function download(protection) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = st.doc?.name || "redline.pdf";
+  a.download = (st.forceSaveAs && st.suggestName) || st.doc?.name || "redline.pdf";
   document.body.append(a);
   a.click();
   a.remove();
@@ -1267,6 +1281,10 @@ async function download(protection) {
     };
   }
   status("Downloaded a copy");
+  if (st.forceSaveAs) {
+    st.forceSaveAs = false;
+    st.suggestName = "";
+  }
   return true;
 }
 
@@ -1293,6 +1311,10 @@ async function runSave(fn) {
 }
 
 async function doSave() {
+  if (st.forceSaveAs) {
+    status("Save this as a new file. The original stays unchanged.");
+    return doSaveAs(st.suggestName);
+  }
   await runSave(async (protection) => {
     if (!st.doc.sourcePath) return download(protection);
     status("Saving…");
@@ -1307,11 +1329,11 @@ async function doSave() {
   });
 }
 
-async function doSaveAs() {
+async function doSaveAs(suggest) {
   await runSave(async (protection) => {
     let r;
     try {
-      r = await api("POST", "/api/pick", { mode: "save" });
+      r = await api("POST", "/api/pick", { mode: "save", suggest: typeof suggest === "string" ? suggest : undefined });
     } catch {
       return download(protection);
     }
@@ -1324,6 +1346,8 @@ async function doSaveAs() {
     if (s.protection) st.doc.protection = s.protection;
     setDirty(false);
     afterOutput(s);
+    st.forceSaveAs = false;
+    st.suggestName = "";
     status(`Saved as ${st.doc.name}`);
     return true;
   });
@@ -1400,6 +1424,7 @@ function setTool(t) {
   $("#cloudopt").hidden = t !== "cloud";
   $("#measureopt").hidden = t !== "measure";
   viewer.dataset.tool = t;
+  if (t === "redact") toggleRedact(true);
   const c = colorName(t);
   $$(".swatch").forEach((s) => s.classList.toggle("active", t !== "select" && t !== "stamp" && s.dataset.color === c));
   closePopover();
@@ -1419,7 +1444,7 @@ $("#cloud-poly").addEventListener("click", () => { st.cloudPoly = true; st.verti
 $$(".swatch").forEach((s) =>
   s.addEventListener("click", async () => {
     const sel = st.tool === "select" && st.annots.find((a) => a.id === st.selected);
-    if (sel && sel.kind !== "stamp") {
+    if (sel && sel.kind !== "stamp" && sel.kind !== "redact") {
       await guarded(async () => {
         await api("PATCH", `/api/annots/${sel.id}`, { color: s.dataset.color });
         await afterAnnotChange();
@@ -1483,12 +1508,14 @@ viewer.addEventListener(
   { passive: false },
 );
 
-const TOOL_KEYS = { v: "select", h: "highlight", u: "underline", k: "strikeout", n: "note", t: "text", p: "pen", l: "line", a: "arrow", b: "box", c: "cloud", g: "polygon", y: "polyline", q: "callout", m: "measure", s: "stamp" };
+const TOOL_KEYS = { v: "select", h: "highlight", u: "underline", k: "strikeout", r: "redact", n: "note", t: "text", p: "pen", l: "line", a: "arrow", b: "box", c: "cloud", g: "polygon", y: "polyline", q: "callout", m: "measure", s: "stamp" };
 window.addEventListener("keydown", (ev) => {
   if (!pwModal.hidden || !protModal.hidden) return;
   const typing = ev.target instanceof HTMLTextAreaElement || ev.target instanceof HTMLInputElement || ev.target instanceof HTMLSelectElement;
   const mod = ev.ctrlKey || ev.metaKey;
   if (mod && ev.key.toLowerCase() === "s") {
+    const warn = document.getElementById("redactwarn");
+    if (warn && !warn.hidden) return;
     ev.preventDefault();
     if (ev.shiftKey) doSaveAs();
     else doSave();
@@ -2443,7 +2470,10 @@ $("#cm-author").addEventListener("click", changeAuthor);
 function toggleComments(force) {
   cm.open = force ?? !cm.open;
   cmPanel.hidden = !cm.open;
-  if (cm.open) refreshComments();
+  if (cm.open) {
+    if (rd.open) toggleRedact(false);
+    refreshComments();
+  }
   if (st.doc) layoutPage();
 }
 $("#btn-comments").addEventListener("click", () => toggleComments());
@@ -2481,12 +2511,13 @@ function renderComments() {
   list.textContent = "";
   if (cm.items === null) { refreshComments(); return; }
   const q = cm.filter.trim().toLowerCase();
-  const items = cm.items.filter((a) => (!cm.thisPage || a.page === st.page) && (!q || [a.contents, a.stamp, a.author, CM_KIND[a.kind], ...(a.replies || []).map((r) => r.contents + " " + r.author)].join(" ").toLowerCase().includes(q)));
-  $("#cm-count").textContent = `${items.length}${items.length !== cm.items.length ? ` / ${cm.items.length}` : ""}`;
+  const source = cm.items.filter((a) => a.kind !== "redact");
+  const items = source.filter((a) => (!cm.thisPage || a.page === st.page) && (!q || [a.contents, a.stamp, a.author, CM_KIND[a.kind], ...(a.replies || []).map((r) => r.contents + " " + r.author)].join(" ").toLowerCase().includes(q)));
+  $("#cm-count").textContent = `${items.length}${items.length !== source.length ? ` / ${source.length}` : ""}`;
   if (!items.length) {
     const e = document.createElement("div");
     e.className = "cm-empty";
-    e.textContent = cm.items.length ? "No comments match" : "No comments yet";
+    e.textContent = source.length ? "No comments match" : "No comments yet";
     list.append(e);
     return;
   }
@@ -2888,7 +2919,7 @@ function gcd1(a, b) { return b ? gcd1(b, a % b) : a; }
 // ---------- forms, signatures, flatten, print, compress ----------
 
 function extraModalOpen() {
-  for (const id of ["signmodal", "flatmodal", "printmodal", "compressmodal"]) {
+  for (const id of ["signmodal", "flatmodal", "printmodal", "compressmodal", "redactwarn"]) {
     const el = document.getElementById(id);
     if (el && !el.hidden) return true;
   }
@@ -2896,7 +2927,7 @@ function extraModalOpen() {
 }
 
 function closeExtraModals() {
-  for (const id of ["signmodal", "flatmodal", "printmodal", "compressmodal"]) {
+  for (const id of ["signmodal", "flatmodal", "printmodal", "compressmodal", "redactwarn"]) {
     const el = document.getElementById(id);
     if (el) el.hidden = true;
   }
@@ -3469,4 +3500,272 @@ $("#compress-go").addEventListener("click", async () => {
 });
 compressModal.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); compressModal.hidden = true; }
+});
+
+// ---------- redaction ----------
+
+const rd = { open: false, hits: [], marks: [], truncated: false, wait: null };
+let rdStyleTimer = null;
+
+function redactOverlay() {
+  const el = $("#rd-overlay");
+  return el ? el.value.replace(/\s+/g, " ").trim().slice(0, 40) : "";
+}
+
+function toggleRedact(force) {
+  const open = force ?? !rd.open;
+  if (open === rd.open) {
+    if (open) refreshRedact();
+    return;
+  }
+  rd.open = open;
+  $("#redact").hidden = !open;
+  if (open) {
+    if (cm.open) toggleComments(false);
+    if (st.tool !== "redact") setTool("redact");
+    refreshRedact();
+  }
+  if (st.doc) layoutPage();
+}
+
+function finishRedactWarn(ok) {
+  $("#redactwarn").hidden = true;
+  const resolve = rd.wait;
+  rd.wait = null;
+  if (resolve) resolve(ok);
+}
+
+function askRedactWarn(mode) {
+  return new Promise((resolve) => {
+    rd.wait = resolve;
+    const sanitize = $("#rd-sanitize").checked;
+    const apply = mode === "apply";
+    $("#rdw-title").textContent = apply ? "Apply redactions" : "Remove hidden information";
+    $("#rdw-lead").textContent = apply
+      ? "Applying redactions permanently removes the text, pictures, and drawings under each box. They cannot be copied, searched, or recovered from the saved file. The original file is not changed. You will be asked to save a new file, with _redacted added to the name."
+      : "This permanently removes document details, attachments, scripts, hidden layers, comments, and older saved copies. Bookmarks and links that point into a marked area are removed too. The original file is not changed. You will be asked to save a new file.";
+    $("#rdw-extra").textContent = apply && sanitize ? "Hidden information will also be removed." : "";
+    $("#rdw-go").textContent = apply ? "Apply and save a new file" : "Remove and save a new file";
+    $("#redactwarn").hidden = false;
+    $("#rdw-go").focus();
+  });
+}
+
+async function refreshRedact() {
+  if (!rd.open || !st.doc) {
+    if (!st.doc) rd.marks = [];
+    return;
+  }
+  try {
+    const r = await api("GET", "/api/redact/marks");
+    rd.marks = r.marks || [];
+  } catch (e) {
+    rd.marks = [];
+    status(e.message, true);
+  }
+  renderRedact();
+}
+
+function renderRedact() {
+  if (!rd.open) return;
+  $("#rd-count").textContent = rd.marks.length ? String(rd.marks.length) : "";
+  $("#rd-hitcount").textContent = rd.hits.length
+    ? `${rd.hits.length} to review${rd.truncated ? " (first 500)" : ""}`
+    : "";
+  const hits = $("#rd-hits");
+  hits.textContent = "";
+  if (!rd.hits.length) {
+    const empty = document.createElement("div");
+    empty.className = "cm-empty";
+    empty.textContent = "No search results";
+    hits.append(empty);
+  } else {
+    for (const hit of rd.hits) {
+      const row = document.createElement("div");
+      row.className = "rd-item";
+      const top = document.createElement("div");
+      top.className = "top";
+      const label = document.createElement("b");
+      label.textContent = hit.text || "(blank)";
+      const page = document.createElement("span");
+      page.textContent = `p.${hit.page + 1}`;
+      top.append(label, page);
+      const ctx = document.createElement("div");
+      ctx.className = "ctx";
+      ctx.textContent = hit.context || "";
+      const acts = document.createElement("div");
+      acts.className = "acts";
+      const accept = document.createElement("button");
+      accept.type = "button";
+      accept.textContent = "Accept";
+      const reject = document.createElement("button");
+      reject.type = "button";
+      reject.textContent = "Reject";
+      accept.addEventListener("click", (ev) => { ev.stopPropagation(); acceptHits([hit]); });
+      reject.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        rd.hits = rd.hits.filter((h) => h.id !== hit.id);
+        renderRedact();
+      });
+      acts.append(accept, reject);
+      row.append(top, ctx, acts);
+      row.addEventListener("click", () => gotoPage(hit.page));
+      hits.append(row);
+    }
+  }
+  const marks = $("#rd-marks");
+  marks.textContent = "";
+  if (!rd.marks.length) {
+    const empty = document.createElement("div");
+    empty.className = "cm-empty";
+    empty.textContent = "No marks yet";
+    marks.append(empty);
+  } else {
+    for (const mark of rd.marks) {
+      const row = document.createElement("div");
+      row.className = "rd-item";
+      const top = document.createElement("div");
+      top.className = "top";
+      const label = document.createElement("b");
+      label.textContent = mark.label || mark.overlay || "Area";
+      const page = document.createElement("span");
+      page.textContent = `p.${mark.page + 1}`;
+      top.append(label, page);
+      const acts = document.createElement("div");
+      acts.className = "acts";
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "Remove";
+      remove.addEventListener("click", (ev) => { ev.stopPropagation(); removeMark(mark.id); });
+      acts.append(remove);
+      row.append(top, acts);
+      row.addEventListener("click", () => gotoPage(mark.page));
+      marks.append(row);
+    }
+  }
+  $("#rd-apply").disabled = !rd.marks.length;
+}
+
+async function runRedactSearch() {
+  if (!st.doc) return;
+  const pattern = $("#rd-pattern").value;
+  const query = $("#rd-q").value.trim();
+  if (pattern === "text" && !query) {
+    status("Type a word or phrase", true);
+    return;
+  }
+  const body = pattern === "text" ? { query } : { pattern };
+  const r = await guarded(() => api("POST", "/api/redact/search", body));
+  if (!r) return;
+  rd.hits = r.hits || [];
+  rd.truncated = !!r.truncated;
+  renderRedact();
+  status(r.total ? `${r.total} match${r.total === 1 ? "" : "es"}. Accept the ones to mark.` : "No matches");
+}
+
+async function acceptHits(hits) {
+  if (!hits.length || !st.doc) return;
+  const r = await guarded(() => api("POST", "/api/redact/hits", {
+    hits,
+    color: st.colors.redact || "black",
+    overlay: redactOverlay(),
+  }));
+  if (!r) return;
+  const ids = new Set(hits.map((h) => h.id));
+  rd.hits = rd.hits.filter((h) => !ids.has(h.id));
+  rd.marks = r.pending || rd.marks;
+  renderRedact();
+  await afterAnnotChange();
+  status(hits.length === 1 ? "Marked 1 match" : `Marked ${hits.length} matches`);
+}
+
+async function removeMark(id) {
+  await guarded(async () => {
+    await api("DELETE", `/api/annots/${id}`);
+    if (st.selected === id) st.selected = null;
+    await afterAnnotChange();
+    status("Removed mark");
+  });
+}
+
+function scheduleRedactStyle() {
+  clearTimeout(rdStyleTimer);
+  rdStyleTimer = setTimeout(pushRedactStyle, 300);
+}
+
+async function pushRedactStyle() {
+  if (!st.doc || !rd.marks.length) return;
+  await guarded(async () => {
+    const r = await api("POST", "/api/redact/style", { color: st.colors.redact || "black", overlay: redactOverlay() });
+    rd.marks = r.marks || rd.marks;
+    await afterAnnotChange();
+  });
+}
+
+async function afterPermanent(s, message) {
+  st.forceSaveAs = true;
+  st.suggestName = s.suggest || "";
+  st.rev++;
+  rd.hits = [];
+  setDoc(s, Math.min(st.page, Math.max(0, s.pageCount - 1)));
+  buildThumbs();
+  showPage();
+  setDirty(true);
+  await refreshRedact();
+  status(message);
+  await doSaveAs(st.suggestName);
+}
+
+async function applyRedactions() {
+  if (!st.doc) return;
+  if (!rd.marks.length) {
+    status("Mark something before applying", true);
+    return;
+  }
+  clearTimeout(rdStyleTimer);
+  await pushRedactStyle();
+  const ok = await askRedactWarn("apply");
+  if (!ok) return;
+  const s = await guarded(() => api("POST", "/api/redact/apply", { page: st.page, sanitize: $("#rd-sanitize").checked }));
+  if (!s) return;
+  await afterPermanent(s, "Redactions applied. Save the result as a new file. The original is unchanged.");
+}
+
+async function sanitizeNow() {
+  if (!st.doc) return;
+  const ok = await askRedactWarn("sanitize");
+  if (!ok) return;
+  const s = await guarded(() => api("POST", "/api/redact/sanitize", {}));
+  if (!s) return;
+  await afterPermanent(s, "Hidden information removed. Save the result as a new file. The original is unchanged.");
+}
+
+$("#btn-redact").addEventListener("click", () => { if (st.doc) toggleRedact(); });
+$("#rd-close").addEventListener("click", () => toggleRedact(false));
+$("#rd-search").addEventListener("click", runRedactSearch);
+$("#rd-q").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") { ev.preventDefault(); runRedactSearch(); }
+  ev.stopPropagation();
+});
+$("#rd-pattern").addEventListener("change", () => {
+  const text = $("#rd-pattern").value === "text";
+  $("#rd-q").disabled = !text;
+  if (!text) $("#rd-q").value = "";
+});
+$("#rd-accept-all").addEventListener("click", () => acceptHits(rd.hits.slice()));
+$("#rd-clear-hits").addEventListener("click", () => { rd.hits = []; rd.truncated = false; renderRedact(); });
+$$(".rd-swatch").forEach((btn) => btn.addEventListener("click", () => {
+  st.colors.redact = btn.dataset.rdColor;
+  $$(".rd-swatch").forEach((b) => b.classList.toggle("active", b === btn));
+  pushRedactStyle();
+}));
+$("#rd-overlay").addEventListener("input", scheduleRedactStyle);
+$("#rd-overlay").addEventListener("keydown", (ev) => ev.stopPropagation());
+$("#rd-apply").addEventListener("click", applyRedactions);
+$("#rd-sanitize-now").addEventListener("click", sanitizeNow);
+$("#rdw-go").addEventListener("click", () => finishRedactWarn(true));
+$("#rdw-cancel").addEventListener("click", () => finishRedactWarn(false));
+$("#rdw-close").addEventListener("click", () => finishRedactWarn(false));
+$("#redactwarn").addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); finishRedactWarn(false); }
 });

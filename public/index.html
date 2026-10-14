@@ -18,6 +18,7 @@
     <button id="btn-send" title="Send by email, handoff, or LocalSend (Ctrl+E)" disabled>Send</button>
     <button id="btn-ocr" title="Read every scanned page so the whole document can be searched (Ctrl+Shift+O)" disabled>Read all</button>
     <button id="btn-find" title="Find text (Ctrl+F)" disabled>Find</button>
+    <button id="btn-redact" title="Mark and apply redactions (R)" disabled>Redact</button>
     <button id="btn-comments" title="Comment list (Ctrl+Shift+M)" disabled>Comments</button>
     <button id="btn-fields" title="Jump to the first fillable field on this page" disabled>Fields</button>
     <button id="btn-sign" title="Draw, type, or place a signature or initials" disabled>Sign</button>
@@ -79,6 +80,7 @@
     <button class="tool" data-tool="highlight" title="Highlight text or an area (H)"><kbd>H</kbd>Highlight</button>
     <button class="tool" data-tool="underline" title="Underline text (U)"><kbd>U</kbd>Underline</button>
     <button class="tool" data-tool="strikeout" title="Strike out text (K)"><kbd>K</kbd>Strikeout</button>
+    <button class="tool" data-tool="redact" title="Mark text or an area for redaction (R)"><kbd>R</kbd>Redact</button>
     <button class="tool" data-tool="note" title="Sticky note (N)"><kbd>N</kbd>Note</button>
     <button class="tool" data-tool="text" title="Text box (T)"><kbd>T</kbd>Text</button>
     <button class="tool" data-tool="pen" title="Freehand pen (P)"><kbd>P</kbd>Pen</button>
@@ -161,6 +163,48 @@
     </div>
   </nav>
   <aside id="thumbs" class="needs-doc"></aside>
+  <aside id="redact" class="comments" hidden>
+    <div class="cm-head">
+      <b>Redact</b>
+      <span id="rd-count" class="ind"></span>
+      <button id="rd-close" class="x" type="button" title="Close">&times;</button>
+    </div>
+    <div class="rd-body">
+      <p class="rd-note">Drag across text or draw a box. Marks stay visible until you apply them. Applying deletes what is underneath and cannot be recovered from the saved file.</p>
+      <label>Find
+        <select id="rd-pattern">
+          <option value="text">Words or phrase</option>
+          <option value="phone">Phone numbers</option>
+          <option value="email">Email addresses</option>
+          <option value="ssn">Social security numbers</option>
+          <option value="money">Dollar amounts</option>
+        </select>
+      </label>
+      <div class="row">
+        <input id="rd-q" type="search" placeholder="Word or phrase" autocomplete="off" spellcheck="false">
+        <button id="rd-search" type="button">Search</button>
+      </div>
+      <div class="rd-hitbar">
+        <span id="rd-hitcount"></span>
+        <button id="rd-accept-all" type="button">Accept all</button>
+        <button id="rd-clear-hits" type="button">Clear</button>
+      </div>
+      <div id="rd-hits" class="rd-list"></div>
+      <div class="rd-label">Pending marks</div>
+      <div id="rd-marks" class="rd-list"></div>
+      <div class="rd-label">Box color</div>
+      <div class="rd-colors">
+        <button type="button" class="rd-swatch active" data-rd-color="black" title="Black" style="--c:#111"></button>
+        <button type="button" class="rd-swatch" data-rd-color="white" title="White" style="--c:#f4f4f4"></button>
+        <button type="button" class="rd-swatch" data-rd-color="red" title="Red" style="--c:#e10600"></button>
+      </div>
+      <label>Text on the box <input id="rd-overlay" type="text" maxlength="40" placeholder="Optional, such as REDACTED" autocomplete="off"></label>
+      <label class="check"><input id="rd-sanitize" type="checkbox"> Also remove hidden information</label>
+      <p class="rd-note">Hidden information is document details, attachments, scripts, hidden layers, comments, and older saved copies. Bookmarks and links that point into a mark are removed too.</p>
+      <button id="rd-apply" class="primary" type="button">Apply redactions</button>
+      <button id="rd-sanitize-now" type="button">Remove hidden information now</button>
+    </div>
+  </aside>
   <aside id="comments" class="comments" hidden>
     <div class="cm-head">
       <b>Comments</b>
@@ -194,6 +238,7 @@
         <button data-act="highlight" title="Highlight selection">Highlight</button>
         <button data-act="underline" title="Underline selection">Underline</button>
         <button data-act="strikeout" title="Strike out selection">Strikeout</button>
+        <button data-act="redact" title="Mark selection for redaction">Redact</button>
         <button data-act="copy" title="Copy selection (Ctrl+C)">Copy</button>
       </div>
       <div id="popover" class="popover" hidden>
@@ -432,6 +477,19 @@
       <button type="button" id="compress-cancel">Cancel</button>
       <button type="button" id="compress-preview">Check size</button>
       <button type="button" id="compress-go" class="primary">Compress</button>
+    </div>
+  </div>
+</div>
+<div id="redactwarn" class="modal-back" hidden>
+  <div class="modal" role="dialog" aria-labelledby="rdw-title">
+    <div class="modal-head"><span id="rdw-title">Apply redactions</span><button type="button" id="rdw-close" class="x" title="Close (Esc)">&times;</button></div>
+    <div class="pane">
+      <p id="rdw-lead" class="lead"></p>
+      <p id="rdw-extra" class="lead"></p>
+    </div>
+    <div class="modal-foot">
+      <button type="button" id="rdw-cancel">Cancel</button>
+      <button type="button" id="rdw-go" class="primary">Apply and save a new file</button>
     </div>
   </div>
 </div>
