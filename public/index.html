@@ -41,6 +41,24 @@
     <button id="btn-zout" title="Zoom out (Ctrl+-)">−</button>
     <button id="zoomind" class="ind" title="Fit width">100%</button>
     <button id="btn-zin" title="Zoom in (Ctrl+=)">+</button>
+    <div class="menuwrap">
+      <button id="btn-view" title="How pages are shown">View &#x25BE;</button>
+      <div id="view-menu" class="menu" hidden>
+        <button data-display="single">Single Page</button>
+        <button data-display="two">Two Pages</button>
+        <button data-display="continuous">Continuous</button>
+        <button data-display="continuous-two">Continuous Two Pages</button>
+        <div class="menu-sep"></div>
+        <button data-zoommode="fit-width" title="Ctrl+0">Fit Width</button>
+        <button data-zoommode="fit-page" title="Ctrl+1">Fit Page</button>
+        <button data-zoommode="actual">Actual Size</button>
+        <div class="menu-sep"></div>
+        <button data-panel="thumbs">Thumbnails</button>
+        <button data-panel="outline">Bookmarks</button>
+      </div>
+    </div>
+    <button id="btn-thumbs" title="Show or hide the page thumbnails">Thumbnails</button>
+    <button id="btn-outline" title="Show or hide bookmarks">Bookmarks</button>
   </div>
   <div class="group needs-doc">
     <button id="btn-rotl" title="Rotate page left">&#x27F2;</button>
@@ -63,6 +81,7 @@
   </div>
   <div id="status" class="status" role="status"></div>
 </header>
+<div id="doctabs" hidden></div>
 
 <div id="findbar" class="findbar" hidden>
   <input id="find-q" type="search" placeholder="Find in document" autocomplete="off" spellcheck="false">
@@ -163,6 +182,13 @@
     </div>
   </nav>
   <aside id="thumbs" class="needs-doc"></aside>
+  <aside id="outline" hidden>
+    <div class="cm-head">
+      <b>Bookmarks</b>
+      <button id="ol-close" class="x" type="button" title="Close">&times;</button>
+    </div>
+    <div id="ol-body"></div>
+  </aside>
   <aside id="redact" class="comments" hidden>
     <div class="cm-head">
       <b>Redact</b>
@@ -230,7 +256,9 @@
         <p>or drop a PDF anywhere in this window</p>
       </div>
     </div>
-    <div id="pagewrap" hidden>
+    <div id="stage" hidden>
+    <div id="sheets"></div>
+    <div id="pagewrap">
       <div id="pagetiles"></div>
       <canvas id="overlay"></canvas>
       <div id="formlayer"></div>
@@ -249,6 +277,7 @@
           <button id="pop-ok" class="primary">Add</button>
         </div>
       </div>
+    </div>
     </div>
   </section>
 </div>
@@ -286,13 +315,26 @@
     <div class="modal-foot"><span id="pg-msg" class="send-msg"></span><button id="pg-cancel">Cancel</button><button id="pg-go" class="primary">Go</button></div>
   </div>
 </div>
+<div id="closemodal" class="modal-back" hidden>
+  <div class="modal" role="dialog" aria-labelledby="close-title">
+    <div class="modal-head"><span id="close-title">Unsaved changes</span><button id="close-x" class="x" type="button" title="Cancel">&times;</button></div>
+    <div class="pane">
+      <p class="lead" id="close-lead">This file has changes that are not saved.</p>
+    </div>
+    <div class="modal-foot">
+      <button id="close-cancel" type="button">Cancel</button>
+      <button id="close-discard" type="button">Don't save</button>
+      <button id="close-save" class="primary" type="button">Save</button>
+    </div>
+  </div>
+</div>
 <div id="dropmodal" class="modal-back" hidden>
   <div class="modal" role="dialog">
     <div class="modal-head"><span>Dropped <b id="drop-name"></b></span><button id="drop-close" class="x" title="Close (Esc)">&times;</button></div>
     <div class="pane">
       <p class="lead">A document is already open. What should happen with the dropped file(s)?</p>
       <div class="row wrap">
-        <button id="drop-open" class="primary">Open instead</button>
+        <button id="drop-open" class="primary">Open in a new tab</button>
         <button id="drop-after">Insert after this page</button>
         <button id="drop-end">Append at the end</button>
       </div>

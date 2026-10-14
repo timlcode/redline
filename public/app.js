@@ -1,6 +1,21 @@
 // Redline UI. All geometry sent to the server is in CSS pixels of the page image at
 // the current zoom; the server converts it with the same matrix it renders with.
 
+import {
+  bookmarkScroll,
+  dominantPage,
+  fitZoom,
+  flattenOutline,
+  initialCollapsed,
+  isContinuous,
+  isSpread,
+  layoutDocument,
+  normalizeMode,
+  pagesNearView,
+  spreadStart,
+  toggleCollapsed,
+} from "/view.mjs";
+
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
@@ -41,13 +56,25 @@ const st = {
   focusFieldId: null,
   forceSaveAs: false,
   suggestName: "",
+  docId: null,
+  tabs: [],
+  views: new Map(),
+  displayMode: "single",
+  zoomMode: "fit-width",
+  outline: [],
+  outlineCollapsed: new Set(),
+  showThumbs: true,
+  showOutline: false,
 };
 
 const viewer = $("#viewer");
+const stage = $("#stage");
+const sheets = $("#sheets");
 const tiles = $("#pagetiles");
 const canvas = $("#overlay");
 const ctx = canvas.getContext("2d");
 const wrap = $("#pagewrap");
+let docLayout = null;
 const pop = $("#popover");
 const popText = $("#pop-text");
 
@@ -62,9 +89,20 @@ function status(msg, isErr = false) {
   if (msg && !isErr) statusTimer = setTimeout(() => (el.textContent = ""), 4000);
 }
 
+function docHeaders(headers = {}) {
+  const out = { ...headers };
+  if (st.docId) out["X-Doc-Id"] = st.docId;
+  return out;
+}
+
+function docQuery() {
+  return st.docId ? `&doc=${encodeURIComponent(st.docId)}` : "";
+}
+
 async function api(method, path, body, raw) {
   const opts = { method, headers: {} };
   if (method !== "GET") opts.headers["X-Redline"] = "1";
+  if (st.docId) opts.headers["X-Doc-Id"] = st.docId;
   if (raw) {
     opts.body = raw.body;
     Object.assign(opts.headers, raw.headers);
@@ -110,7 +148,10 @@ function setDoc(summary, page) {
   st.selected = null;
   document.body.classList.add("has-doc");
   $("#empty").hidden = true;
+  stage.hidden = false;
   wrap.hidden = false;
+  if (summary.id) st.docId = summary.id;
+  if (summary.tabs) renderTabs(summary.tabs);
   $("#btn-save").disabled = false;
   $("#btn-saveas").disabled = false;
   $("#btn-protect").disabled = false;
@@ -130,6 +171,11 @@ function setDoc(summary, page) {
 function setDirty(d) {
   if (!st.doc) return;
   st.doc.dirty = d;
+  const tab = (st.tabs || []).find((t) => t.id === st.docId);
+  if (tab && tab.dirty !== !!d) {
+    tab.dirty = !!d;
+    renderTabs(st.tabs);
+  }
   updateChrome();
 }
 
@@ -140,6 +186,19 @@ function updateChrome() {
   $("#dirty").hidden = !d?.dirty;
   $("#pageind").textContent = d ? `${st.page + 1} / ${d.pageCount}` : "– / –";
   $("#zoomind").textContent = `${Math.round(st.zoom * 100)}%`;
+  const fitLabel = st.zoomMode === "fit-page" ? "Fit page" : st.zoomMode === "fit-width" ? "Fit width" : "Custom zoom";
+  $("#zoomind").title = `${fitLabel}. Click for Fit Width.`;
+  for (const b of document.querySelectorAll("#view-menu button[data-display]")) b.classList.toggle("on", b.dataset.display === st.displayMode);
+  for (const b of document.querySelectorAll("#view-menu button[data-zoommode]")) {
+    const on = (b.dataset.zoommode === "fit-width" && st.zoomMode === "fit-width")
+      || (b.dataset.zoommode === "fit-page" && st.zoomMode === "fit-page")
+      || (b.dataset.zoommode === "actual" && st.zoomMode === "custom" && Math.abs(st.zoom - 1) < 0.001);
+    b.classList.toggle("on", on);
+  }
+  $("#view-menu button[data-panel='thumbs']")?.classList.toggle("on", st.showThumbs);
+  $("#view-menu button[data-panel='outline']")?.classList.toggle("on", st.showOutline);
+  $("#btn-thumbs")?.classList.toggle("on", st.showThumbs);
+  $("#btn-outline")?.classList.toggle("on", st.showOutline);
   document.title = d ? `${d.dirty ? "• " : ""}${d.name || "Untitled"} – Redline` : "Redline";
   $("#btn-prev").disabled = !d || st.page === 0;
   $("#btn-next").disabled = !d || st.page >= d.pageCount - 1;
@@ -220,6 +279,99 @@ function layoutPage() {
   layoutFields();
 }
 
+function relayout() {
+  if (!st.doc) return;
+  const mode = normalizeMode(st.displayMode);
+  st.displayMode = mode;
+  if (st.zoomMode === "fit-width" || st.zoomMode === "fit-page") {
+    st.zoom = fitZoom({
+      pages: st.doc.pages,
+      mode,
+      focus: st.page,
+      viewW: Math.max(80, viewer.clientWidth - 16),
+      viewH: Math.max(80, viewer.clientHeight - 8),
+      fit: st.zoomMode === "fit-page" ? "page" : "width",
+    });
+  }
+  docLayout = layoutDocument(st.doc.pages, mode, st.zoom, { focus: st.page });
+  stage.hidden = false;
+  stage.style.width = `${docLayout.width}px`;
+  stage.style.height = `${docLayout.height}px`;
+  syncSheets();
+  positionActive();
+  layoutPage();
+}
+
+function syncSheets() {
+  const want = docLayout?.pages || [];
+  const key = `${st.displayMode}:${want.map((p) => p.index).join(",")}`;
+  if (sheets.dataset.key !== key) {
+    sheets.textContent = "";
+    for (const p of want) {
+      const el = document.createElement("div");
+      el.className = "sheet";
+      el.dataset.page = String(p.index);
+      const layer = document.createElement("div");
+      layer.className = "sheet-tiles";
+      el.append(layer);
+      el.addEventListener("pointerdown", (ev) => {
+        if (ev.button !== 0 || document.body.classList.contains("space-pan")) return;
+        const index = Number(el.dataset.page);
+        if (index !== st.page) focusSheet(index);
+      });
+      sheets.append(el);
+    }
+    sheets.dataset.key = key;
+  }
+  for (const p of want) {
+    const el = sheets.querySelector(`.sheet[data-page="${p.index}"]`);
+    if (!el) continue;
+    el.style.left = `${p.x}px`;
+    el.style.top = `${p.y}px`;
+    el.style.width = `${p.w}px`;
+    el.style.height = `${p.h}px`;
+    el.classList.toggle("active", p.index === st.page);
+  }
+}
+
+function positionActive() {
+  const b = docLayout?.pages.find((p) => p.index === st.page);
+  if (!b) return;
+  wrap.style.left = `${b.x}px`;
+  wrap.style.top = `${b.y}px`;
+  for (const el of sheets.querySelectorAll(".sheet")) el.classList.toggle("active", Number(el.dataset.page) === st.page);
+}
+
+function focusSheet(index) {
+  if (!st.doc || index === st.page) return;
+  st.page = index;
+  st.selected = null;
+  clearSel();
+  positionActive();
+  layoutPage();
+  updateChrome();
+  loadAnnots();
+  loadFields();
+  paintTiles();
+  ocrAround(st.page);
+}
+
+function scrollPageIntoView(index, point) {
+  if (!docLayout) return;
+  const target = point ? bookmarkScroll(docLayout, index, point, st.zoom, viewer.clientHeight) : null;
+  if (target) {
+    viewer.scrollTop = target.top;
+    viewer.scrollLeft = target.left;
+    return;
+  }
+  const b = docLayout.pages.find((p) => p.index === index);
+  if (!b) return;
+  const top = viewer.scrollTop;
+  const bottom = top + viewer.clientHeight;
+  if (b.y >= top + 8 && b.y + Math.min(b.h, 80) <= bottom) return;
+  viewer.scrollTop = Math.max(0, b.y - 16);
+}
+
 function tilesCovering(pageW, pageH, view) {
   const x0 = Math.max(0, view.x);
   const y0 = Math.max(0, view.y);
@@ -239,16 +391,20 @@ function tilesCovering(pageW, pageH, view) {
   return out;
 }
 
-function paintTiles() {
-  if (!st.doc) return;
-  const gen = ++tileGen;
+function deviceZoom() {
   const dpr = window.devicePixelRatio || 1;
-  const z = Number(Math.min(4, Math.max(0.25, st.zoom * dpr)).toFixed(3));
-  const { w, h } = pageSize();
-  const pw = Math.max(1, Math.ceil(w * z));
-  const ph = Math.max(1, Math.ceil(h * z));
+  return Number(Math.min(4, Math.max(0.25, st.zoom * dpr)).toFixed(3));
+}
+
+function paintTilesInto(container, pageIndex, gen) {
+  const page = st.doc?.pages?.[pageIndex];
+  if (!page || !container) return;
+  const dpr = window.devicePixelRatio || 1;
+  const z = deviceZoom();
+  const pw = Math.max(1, Math.ceil(page.width * z));
+  const ph = Math.max(1, Math.ceil(page.height * z));
   const vr = viewer.getBoundingClientRect();
-  const wr = wrap.getBoundingClientRect();
+  const wr = container.getBoundingClientRect();
   const left = Math.max(0, vr.left - wr.left);
   const top = Math.max(0, vr.top - wr.top);
   const right = Math.min(wr.width, Math.max(left, vr.right - wr.left));
@@ -262,9 +418,9 @@ function paintTiles() {
   const need = tilesCovering(pw, ph, view);
   const keep = new Set();
   for (const t of need) {
-    const key = `${st.page}:${z}:${t.x}:${t.y}:${t.w}:${t.h}:${st.rev}`;
+    const key = `${pageIndex}:${z}:${t.x}:${t.y}:${t.w}:${t.h}:${st.rev}:${st.docId || ""}`;
     keep.add(key);
-    if (tiles.querySelector(`img[data-key="${key}"]`)) continue;
+    if (container.querySelector(`img[data-key="${CSS.escape(key)}"]`)) continue;
     const im = document.createElement("img");
     im.dataset.key = key;
     im.alt = "";
@@ -273,16 +429,39 @@ function paintTiles() {
     im.style.top = `${t.y / dpr}px`;
     im.style.width = `${t.w / dpr}px`;
     im.style.height = `${t.h / dpr}px`;
-    im.onerror = () => { if (gen === tileGen) status("Could not render page", true); };
-    im.src = `/api/page/${st.page}/tile?zoom=${z}&x=${t.x}&y=${t.y}&w=${t.w}&h=${t.h}&v=${st.rev}`;
-    tiles.append(im);
+    im.onerror = () => { if (gen === tileGen && pageIndex === st.page) status("Could not render page", true); };
+    im.src = `/api/page/${pageIndex}/tile?zoom=${z}&x=${t.x}&y=${t.y}&w=${t.w}&h=${t.h}&v=${st.rev}${docQuery()}`;
+    container.append(im);
   }
-  for (const el of [...tiles.querySelectorAll("img")]) if (!keep.has(el.dataset.key)) el.remove();
+  for (const el of [...container.querySelectorAll("img")]) if (!keep.has(el.dataset.key)) el.remove();
+}
+
+function paintTiles() {
+  if (!st.doc) return;
+  const gen = ++tileGen;
+  paintTilesInto(tiles, st.page, gen);
+  paintNeighbors(gen);
+}
+
+function paintNeighbors(gen) {
+  if (!docLayout) return;
+  const margin = Math.max(240, viewer.clientHeight * 0.75);
+  const near = new Set(pagesNearView(docLayout, viewer.scrollTop, viewer.clientHeight, margin));
+  for (const el of sheets.querySelectorAll(".sheet")) {
+    const index = Number(el.dataset.page);
+    const layer = el.querySelector(".sheet-tiles");
+    if (!layer) continue;
+    if (index === st.page || !near.has(index)) {
+      layer.textContent = "";
+      continue;
+    }
+    paintTilesInto(layer, index, gen);
+  }
 }
 
 function loadPageImage(immediate = true) {
   if (!st.doc) return;
-  layoutPage();
+  relayout();
   clearTimeout(imgTimer);
   if (immediate) paintTiles();
   else imgTimer = setTimeout(paintTiles, 80);
@@ -301,7 +480,7 @@ async function loadAnnots() {
 
 let thumbObserver = null;
 function thumbURL(i) {
-  return `/api/thumbs/${i}?v=${st.rev}`;
+  return `/api/thumbs/${i}?v=${st.rev}${docQuery()}`;
 }
 function armThumb(im) {
   if (!im || im.getAttribute("src") || !im.dataset.src) return;
@@ -343,7 +522,7 @@ function refreshThumb(i) {
   if (im.getAttribute("src")) im.src = im.dataset.src;
 }
 
-function showPage() {
+function showPage(opts = {}) {
   st.vertices = [];
   st.calloutTip = null;
   st.measure.points = [];
@@ -351,35 +530,83 @@ function showPage() {
   closePopover();
   loadScale();
   st.annots = [];
+  clearSel();
   loadPageImage(true);
   loadAnnots();
   loadFields();
   updateChrome();
   ocrAround(st.page);
   $(`.thumb[data-page="${st.page}"]`)?.scrollIntoView({ block: "nearest" });
+  if (opts.scroll !== "keep") {
+    if (opts.scroll === "page" || (opts.scroll !== "reset" && isContinuous(st.displayMode))) scrollPageIntoView(st.page, opts.point || null);
+    else { viewer.scrollTop = 0; viewer.scrollLeft = 0; }
+  }
+  markOutline();
 }
 
-function gotoPage(i) {
+function gotoPage(i, opt = {}) {
   if (!st.doc) return;
-  const n = Math.max(0, Math.min(st.doc.pageCount - 1, i));
-  if (n === st.page) return;
+  const n = Math.max(0, Math.min(st.doc.pageCount - 1, i | 0));
+  const point = opt.point || null;
+  if (opt.zoom) {
+    st.zoomMode = "custom";
+    st.zoom = Math.min(4, Math.max(0.25, Math.round(opt.zoom * 100) / 100));
+  }
+  const same = n === st.page && !opt.zoom;
+  const spreadSame = isSpread(st.displayMode) && !isContinuous(st.displayMode) && spreadStart(n) === spreadStart(st.page);
+  if (same && !point) {
+    if (isContinuous(st.displayMode)) scrollPageIntoView(n);
+    return;
+  }
   st.page = n;
   st.selected = null;
-  showPage();
-  viewer.scrollTop = 0;
+  if (spreadSame && !opt.zoom) {
+    clearSel();
+    positionActive();
+    layoutPage();
+    updateChrome();
+    loadAnnots();
+    loadFields();
+    paintTiles();
+    ocrAround(st.page);
+    if (point) scrollPageIntoView(n, point);
+    markOutline();
+    return;
+  }
+  showPage({ scroll: isContinuous(st.displayMode) ? "page" : "reset", point });
 }
 
 function setZoom(z, immediate = false) {
+  st.zoomMode = "custom";
   const nz = Math.min(4, Math.max(0.25, Math.round(z * 100) / 100));
-  if (nz === st.zoom) return;
+  if (nz === st.zoom) {
+    updateChrome();
+    return;
+  }
+  const anchor = viewer.scrollTop + viewer.clientHeight / 2;
+  const ratio = docLayout && docLayout.height > 1 ? anchor / docLayout.height : 0;
   st.zoom = nz;
   updateChrome();
   loadPageImage(immediate);
+  if (isContinuous(st.displayMode) && docLayout) {
+    viewer.scrollTop = Math.max(0, ratio * docLayout.height - viewer.clientHeight / 2);
+    paintTiles();
+  }
+}
+
+function applyFit(which) {
+  st.zoomMode = which === "page" ? "fit-page" : "fit-width";
+  loadPageImage(true);
+  if (isContinuous(st.displayMode)) scrollPageIntoView(st.page);
+  updateChrome();
 }
 
 function fitWidth() {
-  const { w } = pageSize();
-  setZoom((viewer.clientWidth - 48) / w, true);
+  applyFit("width");
+}
+
+function fitPage() {
+  applyFit("page");
 }
 
 // ---------- overlay drawing ----------
@@ -966,7 +1193,8 @@ async function pageOp(path, body, label) {
   st.rev++;
   setDoc(s, s.page);
   buildThumbs();
-  showPage();
+  showPage({ scroll: isContinuous(st.displayMode) ? "page" : "reset" });
+  loadOutline(true);
   setDirty(true);
   status(label);
 }
@@ -1098,7 +1326,28 @@ async function openPath(p) {
   }
 }
 
-function onOpened(s) {
+function rememberView() {
+  if (!st.docId) return;
+  st.views.set(st.docId, {
+    page: st.page,
+    zoom: st.zoom,
+    zoomMode: st.zoomMode,
+    displayMode: st.displayMode,
+    scrollTop: viewer.scrollTop,
+    scrollLeft: viewer.scrollLeft,
+    outlineCollapsed: [...st.outlineCollapsed],
+  });
+}
+
+function onOpened(s, opts = {}) {
+  if (s.reused && s.id && s.id === st.docId) {
+    if (s.tabs) renderTabs(s.tabs);
+    status(`${s.name} is already open`);
+    return !!(s.protection?.encrypted && !s.protection.userPassword);
+  }
+  const fresh = opts.fresh !== false && !s.reused;
+  if (st.docId && st.docId !== s.id) rememberView();
+  const saved = !fresh && s.id ? st.views.get(s.id) : null;
   st.rev++;
   cm.items = null;
   pendingProtection = null;
@@ -1107,17 +1356,34 @@ function onOpened(s) {
   st.flattenOnSave = false;
   st.forceSaveAs = false;
   st.suggestName = "";
-  st.zoom = 1;
   st.kinds = [];
+  st.outline = [];
   closeFind();
   rd.hits = [];
   rd.marks = [];
   if (rd.open) toggleRedact(false);
-  setDoc(s, 0);
+  if (saved) {
+    st.page = saved.page;
+    st.zoom = saved.zoom;
+    st.zoomMode = saved.zoomMode || "custom";
+    st.displayMode = normalizeMode(saved.displayMode);
+    st.outlineCollapsed = new Set(saved.outlineCollapsed || []);
+  } else {
+    st.page = 0;
+    st.zoomMode = "fit-width";
+    st.outlineCollapsed = new Set();
+  }
+  st.docId = s.id || st.docId;
+  setDoc(s, saved ? st.page : 0);
   loadKinds();
   buildThumbs();
-  fitWidth();
-  showPage();
+  loadOutline(fresh || !saved);
+  showPage({ scroll: saved ? "keep" : (isContinuous(st.displayMode) ? "page" : "reset") });
+  if (saved) {
+    viewer.scrollTop = saved.scrollTop || 0;
+    viewer.scrollLeft = saved.scrollLeft || 0;
+    paintTiles();
+  }
   if (s.protection?.encrypted && !s.protection.userPassword) {
     const bits = [];
     if (!s.protection.print) bits.push("printing");
@@ -1164,7 +1430,6 @@ async function uploadFile(file) {
 }
 
 async function doOpen() {
-  if (st.doc?.dirty) status("Unsaved changes will be discarded if you open another file", true);
   try {
     const r = await api("POST", "/api/pick", { mode: "open" });
     if (r.path) await openPath(r.path);
@@ -1248,7 +1513,7 @@ async function download(protection) {
   const mode = protection?.mode || "keep";
   const res = await fetch("/api/download", {
     method: "POST",
-    headers: { "X-Redline": "1", "Content-Type": "application/json" },
+    headers: docHeaders({ "X-Redline": "1", "Content-Type": "application/json" }),
     body: JSON.stringify(outputBody(protection)),
   });
   const ct = res.headers.get("content-type") || "";
@@ -1289,12 +1554,12 @@ async function download(protection) {
 }
 
 async function runSave(fn) {
-  if (!st.doc) return;
+  if (!st.doc) return false;
   let picked;
   if (pendingProtection) picked = { protection: pendingProtection, fromPending: true };
   else if (st.doc.protection?.encrypted) {
     const protection = await askProtection({ purpose: "save" });
-    if (!protection) return;
+    if (!protection) return false;
     picked = { protection, fromPending: false };
   } else picked = { protection: { mode: "keep" }, fromPending: false };
   let ok = false;
@@ -1307,7 +1572,16 @@ async function runSave(fn) {
     wipeProtection(pendingProtection);
     pendingProtection = null;
   }
-  if (ok) updateChrome();
+  if (ok) {
+    const tab = (st.tabs || []).find((t) => t.id === st.docId);
+    if (tab) {
+      tab.dirty = !!st.doc.dirty;
+      tab.name = st.doc.name;
+    }
+    renderTabs(st.tabs);
+    updateChrome();
+  }
+  return !!ok;
 }
 
 async function doSave() {
@@ -1315,7 +1589,7 @@ async function doSave() {
     status("Save this as a new file. The original stays unchanged.");
     return doSaveAs(st.suggestName);
   }
-  await runSave(async (protection) => {
+  return runSave(async (protection) => {
     if (!st.doc.sourcePath) return download(protection);
     status("Saving…");
     const r = await guarded(() => api("POST", "/api/save", outputBody(protection)));
@@ -1330,7 +1604,7 @@ async function doSave() {
 }
 
 async function doSaveAs(suggest) {
-  await runSave(async (protection) => {
+  return runSave(async (protection) => {
     let r;
     try {
       r = await api("POST", "/api/pick", { mode: "save", suggest: typeof suggest === "string" ? suggest : undefined });
@@ -1492,27 +1766,94 @@ $("#btn-down").addEventListener("click", () =>
   pageOp("/api/pages/move", { from: st.page, to: st.page + 1 }, "Moved page down"),
 );
 
+let pageFollow = 0;
 viewer.addEventListener("scroll", () => {
   if (!st.doc) return;
   clearTimeout(imgTimer);
   imgTimer = setTimeout(paintTiles, 60);
+  if (!isContinuous(st.displayMode) || !docLayout) return;
+  clearTimeout(pageFollow);
+  pageFollow = setTimeout(() => {
+    if (!isContinuous(st.displayMode) || !docLayout) return;
+    const next = dominantPage(docLayout, viewer.scrollTop, viewer.clientHeight);
+    if (next === st.page) return;
+    st.page = next;
+    st.selected = null;
+    clearSel();
+    if (st.zoomMode === "fit-width" || st.zoomMode === "fit-page") relayout();
+    else {
+      positionActive();
+      layoutPage();
+    }
+    updateChrome();
+    loadAnnots();
+    loadFields();
+    ocrAround(st.page);
+    paintTiles();
+    markOutline();
+    $(`.thumb[data-page="${st.page}"]`)?.scrollIntoView({ block: "nearest" });
+  }, 90);
 }, { passive: true });
 
 viewer.addEventListener(
   "wheel",
   (ev) => {
-    if (!ev.ctrlKey || !st.doc) return;
+    if (!(ev.ctrlKey || ev.metaKey) || !st.doc) return;
     ev.preventDefault();
     setZoom(st.zoom * (ev.deltaY < 0 ? 1.1 : 1 / 1.1), false);
   },
   { passive: false },
 );
 
+let pan = null;
+viewer.addEventListener("pointerdown", (ev) => {
+  if (!st.doc) return;
+  const hand = ev.button === 1 || (ev.button === 0 && document.body.classList.contains("space-pan"));
+  if (!hand) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  pan = { id: ev.pointerId, x: ev.clientX, y: ev.clientY, left: viewer.scrollLeft, top: viewer.scrollTop };
+  viewer.setPointerCapture(ev.pointerId);
+  document.body.classList.add("panning");
+}, true);
+viewer.addEventListener("pointermove", (ev) => {
+  if (!pan || ev.pointerId !== pan.id) return;
+  viewer.scrollLeft = pan.left - (ev.clientX - pan.x);
+  viewer.scrollTop = pan.top - (ev.clientY - pan.y);
+});
+function endPan(ev) {
+  if (!pan || (ev && ev.pointerId !== pan.id)) return;
+  pan = null;
+  document.body.classList.remove("panning");
+}
+viewer.addEventListener("pointerup", endPan);
+viewer.addEventListener("pointercancel", endPan);
+viewer.addEventListener("auxclick", (ev) => { if (ev.button === 1) ev.preventDefault(); });
+
 const TOOL_KEYS = { v: "select", h: "highlight", u: "underline", k: "strikeout", r: "redact", n: "note", t: "text", p: "pen", l: "line", a: "arrow", b: "box", c: "cloud", g: "polygon", y: "polyline", q: "callout", m: "measure", s: "stamp" };
 window.addEventListener("keydown", (ev) => {
-  if (!pwModal.hidden || !protModal.hidden) return;
+  if (!pwModal.hidden || !protModal.hidden || !$("#closemodal").hidden) return;
   const typing = ev.target instanceof HTMLTextAreaElement || ev.target instanceof HTMLInputElement || ev.target instanceof HTMLSelectElement;
   const mod = ev.ctrlKey || ev.metaKey;
+  if (ev.key === " " && !typing && st.doc) {
+    ev.preventDefault();
+    document.body.classList.add("space-pan");
+  }
+  if (mod && ev.key.toLowerCase() === "w" && !typing) {
+    ev.preventDefault();
+    if (st.docId) closeTab(st.docId);
+    return;
+  }
+  if (mod && ev.key === "Tab" && st.tabs?.length > 1) {
+    ev.preventDefault();
+    cycleTab(ev.shiftKey ? -1 : 1);
+    return;
+  }
+  if (mod && ev.key === "1" && st.doc) {
+    ev.preventDefault();
+    fitPage();
+    return;
+  }
   if (mod && ev.key.toLowerCase() === "s") {
     const warn = document.getElementById("redactwarn");
     if (warn && !warn.hidden) return;
@@ -1638,13 +1979,20 @@ async function combineUploads(files) {
 }
 
 window.addEventListener("beforeunload", (ev) => {
-  if (st.doc?.dirty) {
+  const dirty = st.doc?.dirty || (st.tabs || []).some((t) => t.dirty);
+  if (dirty) {
     ev.preventDefault();
     ev.returnValue = "";
   }
 });
 
-window.addEventListener("resize", () => drawOverlay());
+window.addEventListener("resize", () => {
+  if (!st.doc) return;
+  if (st.zoomMode === "fit-width" || st.zoomMode === "fit-page") {
+    relayout();
+    paintTiles();
+  } else drawOverlay();
+});
 
 // ---------- send (email / handoff / LocalSend) ----------
 
@@ -1856,6 +2204,279 @@ sendModal.addEventListener("keydown", (ev) => {
     doSend();
   }
 });
+
+window.addEventListener("keyup", (ev) => {
+  if (ev.key === " ") document.body.classList.remove("space-pan");
+});
+window.addEventListener("blur", () => document.body.classList.remove("space-pan"));
+
+// ---------- view modes, tabs, bookmarks ----------
+
+const MODE_LABEL = {
+  single: "Single Page",
+  two: "Two Pages",
+  continuous: "Continuous",
+  "continuous-two": "Continuous Two Pages",
+};
+
+function setDisplayMode(mode) {
+  const next = normalizeMode(mode);
+  if (!st.doc || next === st.displayMode) return;
+  st.displayMode = next;
+  showPage({ scroll: isContinuous(next) ? "page" : "reset" });
+  status(MODE_LABEL[next]);
+}
+
+function setThumbs(on) {
+  st.showThumbs = !!on;
+  document.body.classList.toggle("no-thumbs", !st.showThumbs);
+  updateChrome();
+  refitAfterPanels();
+}
+
+function setOutlineOpen(on) {
+  st.showOutline = !!on;
+  $("#outline").hidden = !st.showOutline;
+  if (st.showOutline) renderOutline();
+  updateChrome();
+  refitAfterPanels();
+}
+
+/** Fit Width / Fit Page follow the space left after the side panels open or close. */
+function refitAfterPanels() {
+  if (!st.doc || (st.zoomMode !== "fit-width" && st.zoomMode !== "fit-page")) return;
+  requestAnimationFrame(() => {
+    if (!st.doc) return;
+    const anchor = viewer.scrollTop + viewer.clientHeight / 2;
+    const ratio = docLayout && docLayout.height > 1 ? anchor / docLayout.height : 0;
+    relayout();
+    if (isContinuous(st.displayMode) && docLayout) {
+      viewer.scrollTop = Math.max(0, ratio * docLayout.height - viewer.clientHeight / 2);
+    }
+    paintTiles();
+    updateChrome();
+  });
+}
+
+let tabsKey = "";
+function renderTabs(list = st.tabs || []) {
+  st.tabs = list || [];
+  const bar = $("#doctabs");
+  const key = st.tabs.map((t) => `${t.id}:${t.dirty ? 1 : 0}:${t.name}:${t.id === st.docId ? 1 : 0}`).join("|");
+  if (key === tabsKey) return;
+  tabsKey = key;
+  bar.textContent = "";
+  if (!st.tabs.length) { bar.hidden = true; return; }
+  bar.hidden = false;
+  for (const t of st.tabs) {
+    const el = document.createElement("div");
+    el.className = "doctab" + (t.id === st.docId ? " active" : "");
+    el.title = t.sourcePath || t.name || "Untitled.pdf";
+    if (t.dirty) {
+      const dot = document.createElement("span");
+      dot.className = "dirty";
+      el.append(dot);
+    }
+    const label = document.createElement("span");
+    label.className = "doctab-name";
+    label.textContent = t.name || "Untitled.pdf";
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "x";
+    x.title = "Close";
+    x.textContent = "×";
+    x.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      closeTab(t.id);
+    });
+    el.addEventListener("click", () => activateTab(t.id));
+    el.append(label, x);
+    bar.append(el);
+  }
+}
+
+async function activateTab(id) {
+  if (!id || id === st.docId) return;
+  rememberView();
+  const s = await guarded(() => api("POST", `/api/docs/${id}/activate`));
+  if (!s) return;
+  onOpened(s, { fresh: false });
+  status(s.name);
+}
+
+function cycleTab(dir) {
+  const list = st.tabs || [];
+  if (list.length < 2) return;
+  const i = Math.max(0, list.findIndex((t) => t.id === st.docId));
+  activateTab(list[(i + dir + list.length) % list.length].id);
+}
+
+let closeWait = null;
+function askClose(name) {
+  return new Promise((resolve) => {
+    closeWait = resolve;
+    $("#close-lead").textContent = `${name || "This file"} has changes that are not saved.`;
+    $("#closemodal").hidden = false;
+    $("#close-save").focus();
+  });
+}
+function finishClose(choice) {
+  $("#closemodal").hidden = true;
+  const resolve = closeWait;
+  closeWait = null;
+  if (resolve) resolve(choice);
+}
+$("#close-cancel").addEventListener("click", () => finishClose("cancel"));
+$("#close-x").addEventListener("click", () => finishClose("cancel"));
+$("#close-discard").addEventListener("click", () => finishClose("discard"));
+$("#close-save").addEventListener("click", () => finishClose("save"));
+$("#closemodal").addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") {
+    ev.stopPropagation();
+    finishClose("cancel");
+  }
+});
+
+async function closeTab(id) {
+  const meta = (st.tabs || []).find((t) => t.id === id);
+  if (!meta && id !== st.docId) return;
+  const name = meta?.name || st.doc?.name || "This file";
+  const dirty = !!(meta?.dirty || (id === st.docId && st.doc?.dirty));
+  let discard = false;
+  if (dirty) {
+    const choice = await askClose(name);
+    if (choice !== "save" && choice !== "discard") return;
+    if (choice === "save") {
+      if (id !== st.docId) await activateTab(id);
+      const ok = await doSave();
+      if (!ok || st.doc?.dirty) return;
+    } else discard = true;
+  }
+  let r;
+  try {
+    r = await api("DELETE", `/api/docs/${id}${discard ? "?discard=1" : ""}`);
+  } catch (e) {
+    status(e.message, true);
+    return;
+  }
+  st.views.delete(id);
+  if (id === st.docId) {
+    if (r.doc) onOpened(r.doc, { fresh: false });
+    else clearDoc();
+  }
+  if (r.tabs) renderTabs(r.tabs);
+}
+
+function clearDoc() {
+  st.doc = null;
+  st.docId = null;
+  st.tabs = [];
+  st.page = 0;
+  st.annots = [];
+  st.outline = [];
+  st.selected = null;
+  docLayout = null;
+  document.body.classList.remove("has-doc");
+  $("#empty").hidden = false;
+  stage.hidden = true;
+  sheets.textContent = "";
+  delete sheets.dataset.key;
+  tiles.textContent = "";
+  for (const id of ["btn-save", "btn-saveas", "btn-protect", "btn-send", "btn-ocr", "btn-find", "btn-redact", "btn-comments", "btn-fields", "btn-sign", "btn-flatten", "btn-print", "btn-compress"]) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = true;
+  }
+  renderTabs([]);
+  updateChrome();
+  renderOutline();
+}
+
+async function loadOutline(reset) {
+  if (!st.docId) return;
+  const id = st.docId;
+  let data;
+  try { data = await api("GET", "/api/outline"); } catch { return; }
+  if (!data || st.docId !== id) return;
+  st.outline = data.outline || [];
+  if (reset) st.outlineCollapsed = initialCollapsed(st.outline);
+  renderOutline();
+}
+
+function renderOutline() {
+  const box = $("#ol-body");
+  if (!box) return;
+  box.textContent = "";
+  const items = st.outline || [];
+  if (!st.doc) {
+    const p = document.createElement("p");
+    p.className = "ol-empty";
+    p.textContent = "Open a PDF to see its bookmarks.";
+    box.append(p);
+    return;
+  }
+  if (!items.length) {
+    const p = document.createElement("p");
+    p.className = "ol-empty";
+    p.textContent = "This PDF has no bookmarks.";
+    box.append(p);
+    return;
+  }
+  for (const row of flattenOutline(items, st.outlineCollapsed)) {
+    const el = document.createElement("div");
+    el.className = "ol-row" + (row.page === st.page ? " here" : "");
+    el.style.paddingLeft = `${6 + row.depth * 14}px`;
+    const twist = document.createElement("button");
+    twist.type = "button";
+    twist.className = "ol-twist";
+    twist.disabled = !row.hasKids;
+    twist.textContent = row.hasKids ? (row.open ? "▾" : "▸") : "";
+    twist.title = row.hasKids ? (row.open ? "Collapse" : "Expand") : "";
+    twist.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      st.outlineCollapsed = toggleCollapsed(st.outlineCollapsed, row.id);
+      renderOutline();
+    });
+    const title = document.createElement("button");
+    title.type = "button";
+    title.className = "ol-title";
+    title.textContent = row.title;
+    title.title = row.page >= 0 ? `${row.title} — page ${row.page + 1}` : row.title;
+    title.addEventListener("click", () => {
+      if (row.page < 0) {
+        status("This bookmark does not point at a page", true);
+        return;
+      }
+      const point = row.x == null && row.y == null ? null : { x: row.x, y: row.y };
+      gotoPage(row.page, { point, zoom: row.zoom || undefined });
+    });
+    el.append(twist, title);
+    box.append(el);
+  }
+}
+
+function markOutline() {
+  if (st.showOutline) renderOutline();
+}
+
+const viewMenu = $("#view-menu");
+$("#btn-view").addEventListener("click", (ev) => {
+  ev.stopPropagation();
+  viewMenu.hidden = !viewMenu.hidden;
+});
+viewMenu.addEventListener("click", (ev) => {
+  const b = ev.target.closest("button");
+  if (!b) return;
+  if (b.dataset.display) setDisplayMode(b.dataset.display);
+  else if (b.dataset.zoommode === "fit-width") fitWidth();
+  else if (b.dataset.zoommode === "fit-page") fitPage();
+  else if (b.dataset.zoommode === "actual") setZoom(1, true);
+  else if (b.dataset.panel === "thumbs") setThumbs(!st.showThumbs);
+  else if (b.dataset.panel === "outline") setOutlineOpen(!st.showOutline);
+  viewMenu.hidden = true;
+});
+$("#btn-thumbs").addEventListener("click", () => setThumbs(!st.showThumbs));
+$("#btn-outline").addEventListener("click", () => setOutlineOpen(!st.showOutline));
+$("#ol-close").addEventListener("click", () => setOutlineOpen(false));
 
 // ---------- boot ----------
 
@@ -2084,7 +2705,7 @@ $("#btn-find").addEventListener("click", openFind);
 $("#find-copy").addEventListener("click", async () => {
   if (!st.doc) return;
   try {
-    const res = await fetch(`/api/text?page=${st.page}`);
+    const res = await fetch(`/api/text?page=${st.page}${docQuery()}`, { headers: docHeaders() });
     const text = await res.text();
     await navigator.clipboard.writeText(text);
     status(`Copied ${text.split(/\s+/).filter(Boolean).length} words from page ${st.page + 1}`);
@@ -2252,7 +2873,11 @@ $("#btn-pages").addEventListener("click", (ev) => {
   ev.stopPropagation();
   pagesMenu.hidden = !pagesMenu.hidden;
 });
-window.addEventListener("click", () => (pagesMenu.hidden = true));
+window.addEventListener("click", () => {
+  pagesMenu.hidden = true;
+  const viewMenu = $("#view-menu");
+  if (viewMenu) viewMenu.hidden = true;
+});
 pagesMenu.addEventListener("click", (ev) => {
   const act = ev.target.closest("button")?.dataset.act;
   if (act) openPages(act);
@@ -2340,7 +2965,8 @@ function afterPagesChanged(s, label) {
   cm.items = null;
   setDoc(s, s.page);
   buildThumbs();
-  showPage();
+  showPage({ scroll: isContinuous(st.displayMode) ? "page" : "reset" });
+  loadOutline(true);
   setDirty(true);
   status(label);
 }
@@ -2618,7 +3244,7 @@ async function exportComments(format) {
     const s = await api("POST", "/api/annots/export", { format, path: r.path });
     status(`Saved ${s.path.replace(/^.*\//, "")}`);
   } catch (e) {
-    if (e.status === 501) window.open(`/api/annots/summary.${format}`, "_blank");
+    if (e.status === 501) window.open(`/api/annots/summary.${format}${st.docId ? `?doc=${encodeURIComponent(st.docId)}` : ""}`, "_blank");
     else status(e.message, true);
   }
 }
@@ -2919,7 +3545,7 @@ function gcd1(a, b) { return b ? gcd1(b, a % b) : a; }
 // ---------- forms, signatures, flatten, print, compress ----------
 
 function extraModalOpen() {
-  for (const id of ["signmodal", "flatmodal", "printmodal", "compressmodal", "redactwarn"]) {
+  for (const id of ["signmodal", "flatmodal", "printmodal", "compressmodal", "redactwarn", "closemodal"]) {
     const el = document.getElementById(id);
     if (el && !el.hidden) return true;
   }
@@ -3418,7 +4044,7 @@ $("#print-go").addEventListener("click", async () => {
   $("#print-msg").textContent = "Preparing…";
   const res = await fetch("/api/print", {
     method: "POST",
-    headers: { "X-Redline": "1", "Content-Type": "application/json" },
+    headers: docHeaders({ "X-Redline": "1", "Content-Type": "application/json" }),
     body: JSON.stringify({ pages, deliver: "dialog" }),
   });
   const ct = res.headers.get("content-type") || "";

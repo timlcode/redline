@@ -1,6 +1,6 @@
 {
   "name": "redline",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "desktopName": "redline",
   "private": true,
   "repository": "github:timlcode/redline",
@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node server.mjs",
     "electron": "electron .",
-    "test": "node --test test/pdf.test.mjs test/ocr.test.mjs test/edit.test.mjs test/pages.test.mjs test/comments.test.mjs test/shapes.test.mjs test/measure.test.mjs test/send.test.mjs test/password.test.mjs test/render.test.mjs test/forms.test.mjs test/output.test.mjs test/signature.test.mjs test/redact.test.mjs",
+    "test": "node --test test/pdf.test.mjs test/ocr.test.mjs test/edit.test.mjs test/pages.test.mjs test/comments.test.mjs test/shapes.test.mjs test/measure.test.mjs test/send.test.mjs test/password.test.mjs test/render.test.mjs test/forms.test.mjs test/output.test.mjs test/signature.test.mjs test/redact.test.mjs test/view.test.mjs test/tabs.test.mjs",
     "bench": "node scripts/bench.mjs",
     "dist": "electron-builder",
     "dist:linux": "electron-builder --linux",
