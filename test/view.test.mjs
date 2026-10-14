@@ -7,6 +7,7 @@ import {
   bookmarkScroll,
   dominantPage,
   fitZoom,
+  pageHoldsCenter,
   flattenOutline,
   initialCollapsed,
   isContinuous,
@@ -101,6 +102,16 @@ test("continuous only treats pages near the viewport as visible", () => {
   const jump = bookmarkScroll(layout, 10, { x: 40, y: 80 }, 1, 800);
   assert.ok(jump.top >= layout.pages[10].y);
   assert.ok(jump.top < layout.pages[10].y + 80);
+});
+
+test("an explicit page stays current while it still crosses the screen", () => {
+  const layout = layoutDocument(letter(6), "continuous-two", 1);
+  const right = layout.pages.find((p) => p.index === 3);
+  const scrollTop = right.y - 16;
+  assert.equal(pageHoldsCenter(layout, 3, scrollTop, 700), true);
+  assert.notEqual(dominantPage(layout, scrollTop, 700), 3);
+  const past = right.y + right.h + 40;
+  assert.equal(pageHoldsCenter(layout, 3, past, 700), false);
 });
 
 test("bookmark rows collapse, expand, and keep their destination page", () => {

@@ -135,6 +135,17 @@ export function pagesNearView(layout, scrollTop, viewH, margin = 0) {
   return out;
 }
 
+/**
+ * True while `page` still crosses the middle of the viewport.
+ * An explicit jump (bookmark, thumbnail) should keep that page until it doesn't.
+ */
+export function pageHoldsCenter(layout, page, scrollTop, viewH) {
+  const box = (layout?.pages || []).find((p) => p.index === page);
+  if (!box) return false;
+  const mid = scrollTop + Math.max(0, viewH) / 2;
+  return box.y <= mid && box.y + box.h >= mid;
+}
+
 /** Page whose center is closest to the middle of the viewport. */
 export function dominantPage(layout, scrollTop, viewH) {
   const pages = layout?.pages || [];

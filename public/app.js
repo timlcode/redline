@@ -5,6 +5,7 @@ import {
   bookmarkScroll,
   dominantPage,
   fitZoom,
+  pageHoldsCenter,
   flattenOutline,
   initialCollapsed,
   isContinuous,
@@ -1777,6 +1778,9 @@ viewer.addEventListener("scroll", () => {
     if (!isContinuous(st.displayMode) || !docLayout) return;
     const next = dominantPage(docLayout, viewer.scrollTop, viewer.clientHeight);
     if (next === st.page) return;
+    // A bookmark, thumbnail, or page button picks a page on purpose. Keep it
+    // while that page still crosses the middle of the screen.
+    if (pageHoldsCenter(docLayout, st.page, viewer.scrollTop, viewer.clientHeight)) return;
     st.page = next;
     st.selected = null;
     clearSel();
