@@ -13,6 +13,7 @@ No cloud. No plugins. No subscription. Your documents never leave your computer.
   it reads page-at-a-time instead of churning for hours.
 - **Markup** — highlight, underline, strikeout, freehand pen, lines, arrows, boxes,
   revision clouds, polygons, polylines, and callouts.
+- **Redact** — mark a rectangle or selected text, or search every page for a word, a phrase, phone numbers, email addresses, social security numbers, or dollar amounts. Accept or reject each match, then apply. Applying permanently removes the text, drawings, and the picture pixels under each box. The box can be black, white, or red, with optional wording such as REDACTED. You can also remove hidden information: document details, attachments, scripts, hidden layers, comments, and older saved copies. The result is saved as a new file, and the original is left as it was.
 - **Measure** — distance and area, with scale calibration and standard architectural /
   engineering / metric scale presets.
 - **Stamps** — fixed, custom-text, dynamic (`{date}` / `{time}` / `{author}`), and image stamps.

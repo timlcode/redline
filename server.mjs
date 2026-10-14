@@ -6,6 +6,7 @@ import os from "node:os";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as P from "./lib/pdf.mjs";
+import * as R from "./lib/redact.mjs";
 import * as S from "./lib/send.mjs";
 import * as O from "./lib/ocrdoc.mjs";
 import { pageTextKind } from "./lib/textlayer.mjs";
@@ -79,6 +80,8 @@ export function createServer(opts = {}) {
     // true when the open file required a user (open) password. The password
     // itself is never stored.
     userPasswordSet: false,
+    // After redaction or sanitize, the next save is a full rewrite.
+    rewriteFull: false,
   };
   let persistTimer = null;
 
@@ -188,6 +191,7 @@ export function createServer(opts = {}) {
     state.name = name;
     state.dirty = false;
     state.userPasswordSet = opened.passwordRequired;
+    state.rewriteFull = false;
     state.rev++;
     try { ocrOnOpen(); } catch (e) { console.error("ocr on open:", e.message); }
     return summary(0);
@@ -288,7 +292,7 @@ export function createServer(opts = {}) {
       replace: false,
     });
     try {
-      return { bytes: P.saveBytes(prepared.doc, spec), stamped: prepared.stamped, flattened: prepared.flattened };
+      return { bytes: P.saveBytes(prepared.doc, spec, { rewrite: state.rewriteFull }), stamped: prepared.stamped, flattened: prepared.flattened };
     } finally {
       if (prepared.changed) dropDoc(prepared.doc);
     }
@@ -305,7 +309,7 @@ export function createServer(opts = {}) {
     });
     let bytes;
     try {
-      bytes = P.saveBytes(state.doc, spec);
+        bytes = P.saveBytes(state.doc, spec, { rewrite: state.rewriteFull });
     } finally {
       // Drop password strings held by this request. The encrypted file does
       // not contain them, and they are not written anywhere else.
@@ -374,7 +378,7 @@ export function createServer(opts = {}) {
   // Snapshot of the document as it is right now (unsaved markup included), named
   // like the open file, for attaching or transferring.
   function exportForSend() {
-    const bytes = P.saveBytes(needDoc());
+    const bytes = P.saveBytes(needDoc(), null, { rewrite: state.rewriteFull });
     // One folder per send: an open Thunderbird draft still points at its copy.
     // Snapshots older than two days are cleaned up.
     fs.mkdirSync(outboxDir, { recursive: true });
@@ -730,7 +734,9 @@ export function createServer(opts = {}) {
     if (p === "/api/annots" && m === "POST") {
       const body = await readJson(req);
       body.author = settings.author;
-      const a = op(`add ${body.tool || "markup"}`, (doc) => P.createAnnot(doc, body));
+      const a = body.tool === "redact"
+        ? op("mark redaction", (doc) => R.addMark(doc, body))
+        : op(`add ${body.tool || "markup"}`, (doc) => P.createAnnot(doc, body));
       mutated();
       return json(res, a, 201);
     }
@@ -923,7 +929,7 @@ export function createServer(opts = {}) {
       return send(res, 200, exported.bytes, "application/pdf", { "Content-Disposition": `attachment; filename="${name}"` });
     }
     if (p === "/api/download" && m === "GET") {
-      const bytes = P.saveBytes(needDoc());
+      const bytes = P.saveBytes(needDoc(), null, { rewrite: state.rewriteFull });
       const name = (state.name || "redline.pdf").replace(/[^\w.\- ]/g, "_");
       return send(res, 200, bytes, "application/pdf", {
         "Content-Disposition": `attachment; filename="${name}"`,
@@ -989,6 +995,42 @@ export function createServer(opts = {}) {
     if (p === "/api/text" && m === "GET") {
       const page = Number(url.searchParams.get("page") ?? 0);
       return send(res, 200, O.pageText(needDoc(), page), "text/plain; charset=utf-8");
+    }
+    if (p === "/api/redact/marks" && m === "GET") return json(res, { marks: R.listMarks(needDoc()) });
+    if (p === "/api/redact/style" && m === "POST") {
+      const b = await readJson(req);
+      const r = op("redaction style", (doc) => R.setMarkStyle(doc, b));
+      mutated();
+      return json(res, r);
+    }
+    if (p === "/api/redact/search" && m === "POST") {
+      const b = await readJson(req);
+      return json(res, R.searchRedactions(needDoc(), b));
+    }
+    if (p === "/api/redact/hits" && m === "POST") {
+      const b = await readJson(req);
+      const marks = op("mark redaction hits", (doc) => R.addMarks(doc, b.hits, { color: b.color, overlay: b.overlay }));
+      mutated();
+      return json(res, { marks, pending: R.listMarks(needDoc()) }, 201);
+    }
+    if (p === "/api/redact/apply" && m === "POST") {
+      const b = await readJson(req);
+      const result = op("apply redactions", (doc) => R.applyRedactions(doc, {
+        color: b.color,
+        overlay: b.overlay,
+        sanitize: !!b.sanitize,
+      }));
+      state.rewriteFull = true;
+      mutated();
+      const suggest = R.suggestedName(state.name);
+      return json(res, { ...summary(Number(b.page) || 0), ...result, suggest, permanent: true });
+    }
+    if (p === "/api/redact/sanitize" && m === "POST") {
+      const areas = R.listMarks(needDoc()).map((m) => ({ page: m.page, rects: [m.rect] }));
+      const result = op("remove hidden information", (doc) => R.sanitizeDocument(doc, areas));
+      state.rewriteFull = true;
+      mutated();
+      return json(res, { ...summary(0), ...result, suggest: R.suggestedName(state.name) });
     }
     if (p === "/api/fields" && m === "GET") {
       return json(res, { fields: Forms.publicFields(Forms.listFields(needDoc())) });
