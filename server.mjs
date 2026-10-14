@@ -1,4 +1,5 @@
 import http from "node:http";
+import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
@@ -25,6 +26,7 @@ const MAX_UPLOAD = 1024 * 1024 * 1024;
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".svg": "image/svg+xml",
   ".png": "image/png",
@@ -71,32 +73,82 @@ export function createServer(opts = {}) {
     return settings;
   }
 
-  const state = {
-    doc: null,
-    sourcePath: null,
-    name: null,
-    dirty: false,
-    rev: 0,
-    // true when the open file required a user (open) password. The password
-    // itself is never stored.
-    userPasswordSet: false,
-    // After redaction or sanitize, the next save is a full rewrite.
-    rewriteFull: false,
-  };
-  let persistTimer = null;
+  // Several documents can be open at once. `activeSlot` is the one a request
+  // uses when it does not name a document. A request that does name one runs
+  // inside that slot, so an edit cannot land on the wrong file.
+  function freshOcr() {
+    return { queue: [], running: false, scheduled: false, doc: null, page: -1, done: 0, error: null, lastMs: 0, kinds: [] };
+  }
+  function blankSlot() {
+    return {
+      id: null,
+      doc: null,
+      sourcePath: null,
+      name: null,
+      dirty: false,
+      rev: 0,
+      userPasswordSet: false,
+      rewriteFull: false,
+      ocr: freshOcr(),
+      closing: false,
+      persistTimer: null,
+    };
+  }
+  const openDocs = new Map();
+  const docStore = new AsyncLocalStorage();
+  let docSeq = 0;
+  let activeSlot = blankSlot();
+  let ocrChain = Promise.resolve();
+  function view() {
+    return docStore.getStore() || activeSlot;
+  }
+  const state = new Proxy(blankSlot(), {
+    get(_t, prop) {
+      const v = view()[prop];
+      return typeof v === "function" ? v.bind(view()) : v;
+    },
+    set(_t, prop, value) {
+      view()[prop] = value;
+      return true;
+    },
+  });
 
-  function persistSoon() {
-    clearTimeout(persistTimer);
-    persistTimer = setTimeout(() => {
-      persistTimer = null;
-      if (!state.doc) return;
+  function tabList() {
+    return [...openDocs.values()].filter((s) => s.doc && !s.closing).map((s) => ({
+      id: s.id,
+      name: s.name,
+      dirty: !!s.dirty,
+      sourcePath: s.sourcePath,
+      pageCount: s.doc.countPages(),
+      active: s === activeSlot,
+    }));
+  }
+
+  function slotByPath(abs) {
+    if (!abs) return null;
+    for (const slot of openDocs.values()) {
+      if (slot.sourcePath === abs && slot.doc && !slot.closing) return slot;
+    }
+    return null;
+  }
+
+  function persistSoon(slot = view()) {
+    clearTimeout(slot.persistTimer);
+    slot.persistTimer = setTimeout(() => {
+      slot.persistTimer = null;
+      if (!slot.doc || slot.closing) return;
       try {
-        fs.writeFileSync(workFile, P.saveBytes(state.doc));
+        const bytes = P.saveBytes(slot.doc);
+        if (slot.id) {
+          fs.mkdirSync(workDir, { recursive: true });
+          fs.writeFileSync(path.join(workDir, `${slot.id}.pdf`), bytes);
+        }
+        if (slot === activeSlot) fs.writeFileSync(workFile, bytes);
       } catch (e) {
         console.error("work copy write failed:", e.message);
       }
     }, 1500);
-    persistTimer.unref?.();
+    slot.persistTimer.unref?.();
   }
 
   function summary(page = 0) {
@@ -112,6 +164,8 @@ export function createServer(opts = {}) {
       dirty: state.dirty,
       rev: state.rev,
       page: p,
+      id: state.id,
+      tabs: tabList(),
       protection: protectionState(),
       ...undoInfo(),
     };
@@ -166,6 +220,50 @@ export function createServer(opts = {}) {
     persistSoon();
   }
 
+  function activateSlot(id) {
+    const slot = openDocs.get(id);
+    if (!slot || !slot.doc || slot.closing) throw P.httpError(404, "That document is not open");
+    activeSlot = slot;
+    docStore.enterWith(slot);
+    return summary(0);
+  }
+
+  function closeSlot(id, { discard = false } = {}) {
+    const slot = openDocs.get(id);
+    if (!slot) throw P.httpError(404, "That document is not open");
+    if (slot.dirty && !discard) {
+      const e = P.httpError(409, "This document has unsaved changes");
+      e.code = "dirty";
+      throw e;
+    }
+    const wasActive = activeSlot === slot;
+    slot.closing = true;
+    if (slot.ocr) {
+      slot.ocr.queue = [];
+      slot.ocr.doc = null;
+    }
+    clearTimeout(slot.persistTimer);
+    openDocs.delete(id);
+    try { fs.rmSync(path.join(workDir, `${slot.id}.pdf`), { force: true }); } catch { /* already gone */ }
+    if (wasActive) {
+      const next = [...openDocs.values()].find((s) => s.doc && !s.closing) || null;
+      activeSlot = next || blankSlot();
+      docStore.enterWith(activeSlot);
+    }
+    const closing = slot;
+    ocrChain = ocrChain.then(() => {
+      try { closing.doc?.destroy(); } catch { /* already gone */ }
+      closing.doc = null;
+    });
+    return {
+      ok: true,
+      closed: id,
+      active: activeSlot.id,
+      doc: wasActive && activeSlot.doc ? summary(0) : null,
+      tabs: tabList(),
+    };
+  }
+
   function loadDoc(bytes, sourcePath, name, password) {
     if (!P.isPdfBytes(bytes)) {
       // an image opens as a one-page document (unsaved: Save As decides where it goes)
@@ -174,6 +272,14 @@ export function createServer(opts = {}) {
       sourcePath = null;
       name = String(name || "image").replace(/\.[^.]+$/, "") + ".pdf";
       password = undefined;
+    }
+    // Opening a file that is already open switches to that tab. Unsaved edits stay.
+    if (sourcePath) {
+      const existing = slotByPath(sourcePath);
+      if (existing) {
+        activateSlot(existing.id);
+        return { ...summary(0), reused: true };
+      }
     }
     // Copy off any WASM view, then open once. A rejected password must not
     // replace the working copy or the document already open.
@@ -184,15 +290,26 @@ export function createServer(opts = {}) {
       try { doc.destroy(); } catch { /* already gone */ }
       throw P.httpError(400, "PDF has no pages");
     }
-    fs.writeFileSync(workFile, copy);
     doc.enableJournal();
-    state.doc = doc;
-    state.sourcePath = sourcePath;
-    state.name = name;
-    state.dirty = false;
-    state.userPasswordSet = opened.passwordRequired;
-    state.rewriteFull = false;
-    state.rev++;
+    const slot = blankSlot();
+    slot.id = `d${++docSeq}`;
+    slot.doc = doc;
+    slot.sourcePath = sourcePath;
+    slot.name = name;
+    slot.dirty = false;
+    slot.userPasswordSet = opened.passwordRequired;
+    slot.rewriteFull = false;
+    slot.rev = 1;
+    openDocs.set(slot.id, slot);
+    try {
+      fs.mkdirSync(workDir, { recursive: true });
+      fs.writeFileSync(path.join(workDir, `${slot.id}.pdf`), copy);
+      fs.writeFileSync(workFile, copy);
+    } catch (e) {
+      console.error("work copy write failed:", e.message);
+    }
+    activeSlot = slot;
+    docStore.enterWith(slot);
     try { ocrOnOpen(); } catch (e) { console.error("ocr on open:", e.message); }
     return summary(0);
   }
@@ -408,7 +525,12 @@ export function createServer(opts = {}) {
   // unread pages) are read completely in the background on open. One page is processed at a time;
   // the inference itself runs on ONNX Runtime's threads so rendering and markup stay responsive.
   const AUTO_OCR_PAGES = opts.autoOcrPages ?? Number(process.env.REDLINE_AUTO_OCR_PAGES ?? 10);
-  const ocr = { queue: [], running: false, doc: null, page: -1, done: 0, error: null, lastMs: 0, kinds: [] };
+
+  function bucket() {
+    const slot = view();
+    if (!slot.ocr) slot.ocr = freshOcr();
+    return slot.ocr;
+  }
 
   function textKinds() {
     const doc = needDoc();
@@ -417,20 +539,44 @@ export function createServer(opts = {}) {
     for (let i = 0; i < n; i++) {
       try { kinds.push(pageTextKind(doc, i)); } catch { kinds.push("none"); }
     }
-    ocr.kinds = kinds;
+    bucket().kinds = kinds;
     return kinds;
   }
 
   function ocrReset() {
+    const ocr = bucket();
     ocr.queue = [];
     ocr.done = 0;
     ocr.error = null;
     ocr.kinds = [];
+    ocr.doc = null;
+  }
+
+  function kickOwned(ocr, owner) {
+    if (ocr.scheduled || !ocr.queue.length || owner.closing) return;
+    ocr.scheduled = true;
+    ocr.running = true;
+    ocrChain = ocrChain.then(async () => {
+      let failed = false;
+      try {
+        await ocrWorker(ocr, owner);
+      } catch (e) {
+        failed = true;
+        ocr.error = String(e.message || e);
+        console.error("ocr:", ocr.error);
+      } finally {
+        ocr.scheduled = false;
+        ocr.running = false;
+        ocr.page = -1;
+        if (!failed && ocr.queue.length && ocr.doc && !owner.closing) kickOwned(ocr, owner);
+      }
+    });
   }
 
   /** Queue pages for reading. front=true puts them ahead of everything else (the page on screen). */
   function ocrEnqueue(pages, { front = false, force = false } = {}) {
     const doc = needDoc();
+    const ocr = bucket();
     const n = doc.countPages();
     const kinds = ocr.kinds.length === n ? ocr.kinds : textKinds();
     const want = (Array.isArray(pages) ? pages.map(Number) : [...Array(n).keys()])
@@ -441,76 +587,73 @@ export function createServer(opts = {}) {
     const items = want.map((page) => ({ page, force }));
     ocr.queue = front ? [...items, ...rest] : [...rest, ...items];
     ocr.doc = doc;
-    if (!ocr.running && ocr.queue.length) ocrWorker();
+    kickOwned(ocr, view());
     return ocrStatus();
   }
 
-  async function ocrWorker() {
-    ocr.running = true;
+  async function ocrWorker(ocr, owner) {
     ocr.error = null;
-    try {
-      await O.engine();
-      while (ocr.queue.length) {
-        const doc = state.doc;
-        if (!doc || doc !== ocr.doc) { ocr.queue = []; break; }
-        let { page, force } = ocr.queue.shift();
-        ocr.page = page;
-        try {
-          // Pages can be inserted/deleted/moved while the engine runs: remember which page
-          // object we read, and write the layer to wherever it is afterwards.
-          const ref = doc.findPage(page).asIndirect();
-          const rec = await O.recognizePage(doc, page, { force });
-          if (state.doc !== doc) break;
-          if (doc.countPages() <= page || doc.findPage(page).asIndirect() !== ref) {
-            let found = -1;
-            for (let i = 0; i < doc.countPages(); i++) if (doc.findPage(i).asIndirect() === ref) { found = i; break; }
-            if (found < 0) { ocr.done++; continue; } // page is gone
-            page = found;
-            rec.page = found;
-          }
-          // The layer write is synchronous and merges into the previous user step (or into
-          // nothing on a fresh document), so Undo never has an "OCR" step of its own.
-          doc.beginImplicitOperation();
-          let r;
-          try {
-            r = O.applyPage(doc, rec);
-          } catch (e) {
-            try { doc.abandonOperation(); } catch {}
-            throw e;
-          }
-          doc.endOperation();
-          ocr.lastMs = r.ms;
-          ocr.done++;
-          if (!r.skipped) {
-            ocr.kinds[page] = "ocr";
-            // Background reading is not an edit: no dirty flag, but the text goes out with Save/Send.
-            state.rev++;
-            persistSoon();
-          }
-        } catch (e) {
-          ocr.error = `Page ${page + 1}: ${String(e.message || e)}`;
-          console.error(new Date().toISOString(), "ocr:", ocr.error);
+    await O.engine();
+    while (ocr.queue.length) {
+      const doc = owner.doc;
+      if (!doc || doc !== ocr.doc || owner.closing) { ocr.queue = []; break; }
+      let { page, force } = ocr.queue.shift();
+      ocr.page = page;
+      try {
+        // Pages can be inserted/deleted/moved while the engine runs: remember which page
+        // object we read, and write the layer to wherever it is afterwards.
+        const ref = doc.findPage(page).asIndirect();
+        const rec = await O.recognizePage(doc, page, { force });
+        if (owner.doc !== doc || owner.closing) break;
+        if (doc.countPages() <= page || doc.findPage(page).asIndirect() !== ref) {
+          let found = -1;
+          for (let i = 0; i < doc.countPages(); i++) if (doc.findPage(i).asIndirect() === ref) { found = i; break; }
+          if (found < 0) { ocr.done++; continue; } // page is gone
+          page = found;
+          rec.page = found;
         }
+        // The layer write is synchronous and merges into the previous user step (or into
+        // nothing on a fresh document), so Undo never has an "OCR" step of its own.
+        doc.beginImplicitOperation();
+        let r;
+        try {
+          r = O.applyPage(doc, rec);
+        } catch (e) {
+          try { doc.abandonOperation(); } catch {}
+          throw e;
+        }
+        doc.endOperation();
+        ocr.lastMs = r.ms;
+        ocr.done++;
+        if (!r.skipped) {
+          ocr.kinds[page] = "ocr";
+          // Background reading is not an edit: no dirty flag, but the text goes out with Save/Send.
+          owner.rev++;
+          persistSoon(owner);
+        }
+      } catch (e) {
+        ocr.error = `Page ${page + 1}: ${String(e.message || e)}`;
+        console.error(new Date().toISOString(), "ocr:", ocr.error);
       }
-    } finally {
-      ocr.running = false;
-      ocr.page = -1;
     }
   }
 
   /** Page order changed: drop the queue and the cached kinds (indices moved). */
   function ocrPagesChanged() {
+    const ocr = bucket();
     ocr.queue = [];
     ocr.kinds = [];
   }
 
   function ocrCancel() {
+    const ocr = bucket();
     const n = ocr.queue.length;
     ocr.queue = [];
     return { ok: true, dropped: n, ...ocrStatus() };
   }
 
   function ocrStatus() {
+    const ocr = bucket();
     const kinds = state.doc && ocr.kinds.length === state.doc.countPages() ? ocr.kinds : state.doc ? textKinds() : [];
     const unread = kinds.filter((k) => k === "none").length;
     return {
@@ -617,6 +760,15 @@ export function createServer(opts = {}) {
       return serveStatic(res, p);
     }
 
+    const wantDoc = req.headers["x-doc-id"] || url.searchParams.get("doc");
+    if (wantDoc) {
+      const named = openDocs.get(String(wantDoc));
+      if (!named || named.closing) return json(res, { error: "That document is not open" }, 404);
+      docStore.enterWith(named);
+    } else {
+      docStore.enterWith(activeSlot);
+    }
+
     if (p === "/api/health" && m === "GET") return json(res, { ok: true, version: VERSION });
 
     if (p === "/api/open" && m === "POST") {
@@ -638,8 +790,14 @@ export function createServer(opts = {}) {
       needDoc();
       return json(res, summary(Number(url.searchParams.get("page")) || 0));
     }
+    if (p === "/api/docs" && m === "GET") return json(res, { active: activeSlot.id, docs: tabList() });
+    if (p === "/api/outline" && m === "GET") return json(res, { outline: P.outlineTree(needDoc()) });
 
     let mm;
+    if ((mm = p.match(/^\/api\/docs\/([A-Za-z0-9_-]+)\/activate$/)) && m === "POST") return json(res, activateSlot(mm[1]));
+    if ((mm = p.match(/^\/api\/docs\/([A-Za-z0-9_-]+)$/)) && m === "DELETE") {
+      return json(res, closeSlot(mm[1], { discard: url.searchParams.get("discard") === "1" }));
+    }
     if ((mm = p.match(/^\/api\/page\/(\d+)\/tile$/)) && m === "GET") {
       const png = P.renderTile(
         needDoc(),
