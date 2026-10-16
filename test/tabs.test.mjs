@@ -118,3 +118,50 @@ test("tabs keep each file's edits, and bookmarks jump to the saved page", async 
   assert.deepEqual(closedA.body.tabs, []);
   assert.equal((await api("GET", "/api/doc")).status, 404);
 });
+
+
+test("files opened from outside queue into one window as tabs", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "redline-inbox-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const aPath = path.join(dir, "alpha.pdf");
+  const bPath = path.join(dir, "beta.pdf");
+  fs.writeFileSync(aPath, P.saveBytes(docWithPages(["ALPHA"])));
+  fs.writeFileSync(bPath, P.saveBytes(docWithPages(["BETA"])));
+  const server = createServer({ autoOcrPages: 0, dataDir: path.join(dir, "data"), pickCommand: false });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const api = async (method, p, body) => {
+    const res = await fetch(base + p, {
+      method,
+      headers: { "X-Redline": "1", ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    return { status: res.status, body: await res.json() };
+  };
+
+  // Default is tabs; no window has polled yet.
+  let h = await api("GET", "/api/health");
+  assert.equal(h.body.openFilesIn, "tabs");
+  assert.equal(h.body.window, false);
+
+  assert.equal((await api("POST", "/api/inbox", { path: aPath })).status, 202);
+  const q = await api("POST", "/api/inbox", { path: bPath });
+  assert.equal(q.body.queued, 2);
+  assert.equal((await api("POST", "/api/inbox", { path: path.join(dir, "nope.pdf") })).status, 404);
+
+  // The window's poll drains the queue in order and marks the window alive.
+  const got = await api("GET", "/api/inbox");
+  assert.deepEqual(got.body.paths, [aPath, bPath]);
+  assert.deepEqual((await api("GET", "/api/inbox")).body.paths, []);
+  h = await api("GET", "/api/health");
+  assert.equal(h.body.window, true);
+
+  // The setting persists and does not wipe the author.
+  const before = (await api("GET", "/api/settings")).body.author;
+  const s = await api("POST", "/api/settings", { openFilesIn: "windows" });
+  assert.equal(s.body.openFilesIn, "windows");
+  assert.equal(s.body.author, before);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "data", "settings.json"), "utf8")).openFilesIn, "windows");
+  assert.equal((await api("POST", "/api/settings", { openFilesIn: "bogus" })).body.openFilesIn, "tabs");
+});
