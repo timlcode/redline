@@ -61,13 +61,15 @@ export function createServer(opts = {}) {
 
   // ---------- settings (author name for comments) ----------
   const settingsFile = path.join(dataDir, "settings.json");
-  let settings = { author: "" };
+  let settings = { author: "", openFilesIn: "tabs" };
   try { settings = { ...settings, ...JSON.parse(fs.readFileSync(settingsFile, "utf8")) }; } catch {}
   if (!settings.author) settings.author = os.userInfo().username || "";
   P.setDefaultAuthor(settings.author);
   function saveSettings(patch) {
+    for (const k of Object.keys(patch)) if (patch[k] === undefined) delete patch[k];
     settings = { ...settings, ...patch };
     settings.author = String(settings.author || "").trim().slice(0, 80);
+    if (settings.openFilesIn !== "windows") settings.openFilesIn = "tabs";
     P.setDefaultAuthor(settings.author);
     try { fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2)); } catch (e) { console.error("settings write failed:", e.message); }
     return settings;
@@ -96,6 +98,9 @@ export function createServer(opts = {}) {
   }
   const openDocs = new Map();
   const docStore = new AsyncLocalStorage();
+  const inbox = [];
+  let lastWindowPoll = 0;
+  const windowAlive = () => Date.now() - lastWindowPoll < 4000;
   let docSeq = 0;
   let activeSlot = blankSlot();
   let ocrChain = Promise.resolve();
@@ -760,6 +765,20 @@ export function createServer(opts = {}) {
       return serveStatic(res, p);
     }
 
+    // Open-file inbox: the launcher queues files here and a running window
+    // picks them up as tabs, so opening several PDFs gives one window.
+    if (p === "/api/inbox" && m === "GET") {
+      lastWindowPoll = Date.now();
+      return json(res, { paths: inbox.splice(0), openFilesIn: settings.openFilesIn });
+    }
+    if (p === "/api/inbox" && m === "POST") {
+      const b = await readJson(req);
+      const abs = resolveUser(b.path);
+      if (!fs.existsSync(abs)) throw P.httpError(404, `No such file: ${abs}`);
+      inbox.push(abs);
+      return json(res, { queued: inbox.length, window: windowAlive() }, 202);
+    }
+
     const wantDoc = req.headers["x-doc-id"] || url.searchParams.get("doc");
     if (wantDoc) {
       const named = openDocs.get(String(wantDoc));
@@ -769,7 +788,7 @@ export function createServer(opts = {}) {
       docStore.enterWith(activeSlot);
     }
 
-    if (p === "/api/health" && m === "GET") return json(res, { ok: true, version: VERSION });
+    if (p === "/api/health" && m === "GET") return json(res, { ok: true, version: VERSION, window: windowAlive(), openFilesIn: settings.openFilesIn });
 
     if (p === "/api/open" && m === "POST") {
       const body = await readJson(req);
@@ -848,7 +867,7 @@ export function createServer(opts = {}) {
     if (p === "/api/settings" && m === "GET") return json(res, settings);
     if (p === "/api/settings" && (m === "POST" || m === "PUT")) {
       const b = await readJson(req);
-      return json(res, saveSettings({ author: b.author }));
+      return json(res, saveSettings({ author: b.author, openFilesIn: b.openFilesIn }));
     }
     if ((mm = p.match(/^\/api\/annots\/(\d+)\/reply$/)) && m === "POST") {
       const b = await readJson(req);

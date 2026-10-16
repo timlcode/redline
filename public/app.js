@@ -2476,8 +2476,41 @@ viewMenu.addEventListener("click", (ev) => {
   else if (b.dataset.zoommode === "actual") setZoom(1, true);
   else if (b.dataset.panel === "thumbs") setThumbs(!st.showThumbs);
   else if (b.dataset.panel === "outline") setOutlineOpen(!st.showOutline);
+  else if (b.dataset.openin) setOpenFilesIn(b.dataset.openin);
   viewMenu.hidden = true;
 });
+
+// ---------- open-file inbox ----------
+// The launcher queues files opened from the file manager; this window opens
+// them as tabs (default) instead of a new window per file.
+let openFilesIn = "tabs";
+function markOpenIn() {
+  viewMenu.querySelectorAll("[data-openin]").forEach((b) => b.classList.toggle("on", b.dataset.openin === openFilesIn));
+}
+async function setOpenFilesIn(mode) {
+  const s = await guarded(() => api("POST", "/api/settings", { openFilesIn: mode }));
+  if (!s) return;
+  openFilesIn = s.openFilesIn;
+  markOpenIn();
+  status(openFilesIn === "tabs" ? "Files you open will join this window as tabs" : "Files you open will each get a new window");
+}
+let inboxBusy = false;
+async function pollInbox() {
+  if (inboxBusy) return;
+  inboxBusy = true;
+  try {
+    const r = await fetch("/api/inbox");
+    const d = await r.json();
+    if (d.openFilesIn && d.openFilesIn !== openFilesIn) { openFilesIn = d.openFilesIn; markOpenIn(); }
+    for (const p of d.paths || []) {
+      if (st.doc) rememberView();
+      await openPath(p);
+    }
+  } catch { /* server restarting */ }
+  inboxBusy = false;
+}
+markOpenIn();
+setInterval(pollInbox, 700);
 $("#btn-thumbs").addEventListener("click", () => setThumbs(!st.showThumbs));
 $("#btn-outline").addEventListener("click", () => setOutlineOpen(!st.showOutline));
 $("#ol-close").addEventListener("click", () => setOutlineOpen(false));
@@ -2491,6 +2524,7 @@ $("#ol-close").addEventListener("click", () => setOutlineOpen(false));
   if (openParam) {
     history.replaceState(null, "", "/");
     await openPath(openParam);
+    pollInbox();
     return;
   }
   try {

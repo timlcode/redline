@@ -6,6 +6,7 @@ const { autoUpdater } = updaterPkg;
 
 let win = null;
 let port = null;
+const pendingOpen = []; // macOS open-file events that arrive before the window exists
 
 const PDF_FILTERS = [
   {
@@ -130,23 +131,40 @@ function setupUpdater() {
   setInterval(check, 4 * 60 * 60 * 1000); // every 4 hours
 }
 
+// A file opened while Redline is running joins the window as a new tab: it is
+// queued in the server's open-file inbox, which the window polls.
+function queueOpen(p) {
+  if (!p || !port) return;
+  fetch(`http://127.0.0.1:${port}/api/inbox`, {
+    method: "POST",
+    headers: { "X-Redline": "1", "Content-Type": "application/json" },
+    body: JSON.stringify({ path: p }),
+  }).catch((e) => console.log("[open]", e && e.message ? e.message : e));
+}
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
   app.on("second-instance", (_e, argv) => {
+    const p = fileArg(argv);
     if (win) {
+      if (win.isMinimized()) win.restore();
       win.focus();
-      const p = fileArg(argv);
-      if (p) win.loadURL(`http://127.0.0.1:${port}/?open=${encodeURIComponent(p)}`);
+      queueOpen(p);
     }
   });
-  app.on("open-file", (_e, p) => {
-    if (win) win.loadURL(`http://127.0.0.1:${port}/?open=${encodeURIComponent(p)}`);
+  app.on("open-file", (e, p) => {
+    e.preventDefault();
+    if (win) {
+      win.focus();
+      queueOpen(p);
+    } else pendingOpen.push(p);
   });
   app.whenReady().then(async () => {
     port = await startServer();
-    createWindow(fileArg(process.argv));
+    createWindow(fileArg(process.argv) || pendingOpen.shift() || null);
+    pendingOpen.splice(0).forEach(queueOpen);
     setupUpdater();
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow(null);
